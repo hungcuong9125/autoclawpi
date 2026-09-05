@@ -67,6 +67,12 @@ func Load() (*Config, error) {
 			return nil, err
 		}
 	}
+	// Fallback env: API key boleh disuplai lewat environment ketika
+	// config.json tidak menetapkan api_key (flag --api-key tetap
+	// mengoverride keduanya).
+	if c.APIKey == "" {
+		c.APIKey = os.Getenv("AUTOCLAWPI_API_KEY")
+	}
 	c.Defaults()
 	return c, nil
 }

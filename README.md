@@ -212,6 +212,7 @@ Client (OpenAI SDK) → autoclawpi (port 8787)
 | Variable | Description |
 |----------|-------------|
 | `AUTOCLAWPI_DIR` | Data directory (default: `~/.autoclawpi/`) |
+| `AUTOCLAWPI_API_KEY` | API key fallback when `config.json` `api_key` is empty |
 
 ---
 
