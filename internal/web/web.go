@@ -498,7 +498,7 @@ func (s *Server) handleAccountsLoginCaptcha(w http.ResponseWriter, r *http.Reque
 
 	// Start temporary callback server on the listener
 	callbackMux := http.NewServeMux()
-	webPanelURL := fmt.Sprintf("http://localhost:%d", 8787) // known port
+	webPanelURL := "http://" + r.Host
 	callbackMux.HandleFunc("/auth/callback-zai", func(w2 http.ResponseWriter, r2 *http.Request) {
 		handleOAuthCallbackRedirect(w2, r2, s.cl, webPanelURL+"/accounts")
 	})
