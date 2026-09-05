@@ -222,7 +222,7 @@ func (s *Server) forward(ctx context.Context, acct db.Account, route string, bod
 		// 503 final tepat satu kali — mencegah body terkonkatenasi dari
 		// beberapa akun (superfluous WriteHeader). Body tetap di-log.
 		rawBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		go logUsage(acct.ID, route, rawBody)
+		go logUsage(acct.ID, route, resp.StatusCode, rawBody)
 		return resp.StatusCode, ct, rawBody, nil
 	}
 
@@ -283,7 +283,7 @@ func (s *Server) forward(ctx context.Context, acct db.Account, route string, bod
 	}
 
 	// Log token usage
-	go logUsage(acct.ID, route, rawBody)
+	go logUsage(acct.ID, route, resp.StatusCode, rawBody)
 
 	return resp.StatusCode, ct, nil, nil
 }
@@ -336,7 +336,8 @@ func stripNonStandard(body []byte) []byte {
 }
 
 // logUsage parse response body dan catat ke database.
-func logUsage(acctID int64, model string, body []byte) {
+// httpStatus: status code upstream asli (0 bila tidak ada — mis. error network).
+func logUsage(acctID int64, model string, httpStatus int, body []byte) {
 	for bytes.Contains(body, []byte(`"message":"forbidden"`)) {
 		idx := bytes.Index(body, []byte(`"message":"forbidden"`))
 		next := bytes.Index(body[idx+1:], []byte(`{`))
@@ -360,7 +361,16 @@ func logUsage(acctID int64, model string, body []byte) {
 	}
 	status := "success"
 	errMsg := ""
-	if data.Error != nil {
+	if httpStatus != 0 && httpStatus != 200 {
+		// Kegagalan HTTP tanpa error JSON tetap tercatat — dulu
+		// tercatat "success" dengan 0 token.
+		status = "error"
+		if data.Error != nil && data.Error.Message != "" {
+			errMsg = data.Error.Message
+		} else {
+			errMsg = fmt.Sprintf("http %d", httpStatus)
+		}
+	} else if data.Error != nil {
 		status = "error"
 		errMsg = data.Error.Message
 	}
