@@ -263,7 +263,7 @@ func fetchBalanceDashboard(token string) int {
 	req.Header.Set("X-Auth-Sign", sign.Sign(ts))
 	req.Header.Set("X-Product", "autoclaw")
 	req.Header.Set("X-Version", "1.17.9")
-	req.Header.Set("X-Tm", "linux")
+	req.Header.Set("X-Tm", "win")
 	req.Header.Set("X-Lang", "en")
 	req.Header.Set("X-Client-Type", "pc")
 	req.Header.Set("Accept", "*/*")
@@ -991,7 +991,7 @@ func fetchBalance(ctx context.Context, token string, cl *client.Client) int {
 		"X-Lang":           "en",
 		"X-Product":        "autoclaw",
 		"X-Version":        "1.17.9",
-		"X-Tm":             "linux",
+		"X-Tm":             "win",
 		"X-Client-Type":    "pc",
 		"X-Auth-Appid":     "100003",
 		"X-Auth-TimeStamp": fmt.Sprintf("%d", ts),
