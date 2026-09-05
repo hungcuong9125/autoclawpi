@@ -124,51 +124,54 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	s.rrIndex = (s.rrIndex + 1) % len(accounts)
 	s.mu.Unlock()
 
-	for i := 0; i < len(accounts); i++ {
+	var lastStatus int
+	for i := range len(accounts) {
 		idx := (startIdx + i) % len(accounts)
 		acct := accounts[idx]
 		if !acct.Active || acct.AccessToken == "" {
 			continue
 		}
 
-		status, _, _, ferr := s.forward(r.Context(), acct, route, upstreamBody, req.Stream, w)
+		var ferr error
+		lastStatus, _, _, ferr = s.forward(r.Context(), acct, route, upstreamBody, req.Stream, w)
 		if ferr != nil {
 			log.Printf("[autoclawpi] akun #%d error: %v", acct.ID, ferr)
 			continue
 		}
 		// 401 — token expired, coba refresh
-		if status == 401 {
+		if lastStatus == 401 {
 			refreshed, rerr := s.refreshToken(&acct)
 			if rerr != nil {
 				log.Printf("[autoclawpi] akun #%d refresh gagal: %v", acct.ID, rerr)
 				continue
 			}
 			// Retry dengan token baru
-			status, _, _, ferr2 := s.forward(r.Context(), acct, route, upstreamBody, req.Stream, w)
+			var ferr2 error
+			lastStatus, _, _, ferr2 = s.forward(r.Context(), acct, route, upstreamBody, req.Stream, w)
 			if ferr2 != nil {
 				log.Printf("[autoclawpi] akun #%d retry error: %v", acct.ID, ferr2)
 				continue
 			}
 			_ = refreshed
-			if status == 200 {
+			if lastStatus == 200 {
 				return
 			}
 			continue
 		}
 		// 403 — WAF block, coba akun berikutnya
-		if status == 403 {
+		if lastStatus == 403 {
 			log.Printf("[autoclawpi] akun #%d WAF block, coba akun berikutnya", acct.ID)
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
-		if status == 200 {
+		if lastStatus == 200 {
 			return
 		}
 		// Status lain (4xx, 5xx) — coba akun berikutnya
 	}
 
-	// Semua akun gagal
-	writeOpenAIError(w, 503, "all_accounts_failed", "semua akun gagal memproses request")
+	// Semua akun gagal — sertakan status upstream terakhir untuk diagnosis
+	writeOpenAIError(w, 503, "all_accounts_failed", fmt.Sprintf("semua akun gagal memproses request (last_status=%d)", lastStatus))
 }
 
 // forward mengirim request ke upstream dan menulis response ke klien.
@@ -213,68 +216,76 @@ func (s *Server) forward(ctx context.Context, acct db.Account, route string, bod
 		return resp.StatusCode, ct, b, nil
 	}
 
-	// WAF 403 — pakai status 200
-	statusCode := resp.StatusCode
-	if statusCode == 403 {
-		statusCode = 200
+	if resp.StatusCode != 200 {
+		// Upstream gagal (termasuk 403 WAF murni): jangan tulis apa pun
+		// ke w. Handler akan mencoba akun berikutnya atau menulis respons
+		// 503 final tepat satu kali — mencegah body terkonkatenasi dari
+		// beberapa akun (superfluous WriteHeader). Body tetap di-log.
+		rawBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		go logUsage(acct.ID, route, rawBody)
+		return resp.StatusCode, ct, rawBody, nil
 	}
 
-	// Baca response body untuk logging (non-streaming)
-	// (TeeReader digunakan untuk streaming path, baca langsung untuk non-streaming)
-	// Stream balik ke klien
 	w.Header().Set("Content-Type", ct)
 	if stream {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-Accel-Buffering", "no")
-		w.WriteHeader(statusCode)
+		w.WriteHeader(resp.StatusCode)
 		flusher, _ := w.(http.Flusher)
 		buf := make([]byte, 32*1024)
+		first := true
 		for {
 			n, rerr := resp.Body.Read(buf)
 			if n > 0 {
 				data := buf[:n]
-				// Strip SEMUA prefix WAF "message":"forbidden" (bisa muncul berkali-kali)
-				for bytes.Contains(data, []byte(`"message":"forbidden"`)) {
-					idx := bytes.Index(data, []byte(`"message":"forbidden"`))
-					next := bytes.Index(data[idx+1:], []byte(`{`))
-					if next < 0 {
-						break
+				// Buang prefix "forbidden" WAF yang kadang menempel di
+				// depan body SSE stream yang sah.
+				if first && data[0] == '{' && bytes.Contains(data, []byte(`"message":"forbidden"`)) {
+					for i := 1; i < len(data); i++ {
+						if data[i] == '{' {
+							data = data[i:]
+							break
+						}
 					}
-					data = data[idx+next+1:]
 				}
-				if len(data) > 0 {
-					if _, werr := w.Write(data); werr != nil {
-						return statusCode, ct, nil, nil
-					}
-					if flusher != nil {
-						flusher.Flush()
-					}
+				if _, werr := w.Write(data); werr != nil {
+					return resp.StatusCode, ct, nil, nil
+				}
+				if flusher != nil {
+					flusher.Flush()
 				}
 			}
 			if rerr != nil {
 				break
 			}
+			first = false
 		}
-		return statusCode, ct, nil, nil
+		return resp.StatusCode, ct, nil, nil
 	}
 
-	// Non-streaming: baca body, clean, kirim
+	// Non-streaming sukses: baca body, bersihkan, kirim, log.
 	rawBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	cleaned := stripNonStandard(rawBody)
 	if cleaned == nil || isWAFBlockOnly(cleaned) {
-		// Hard WAF block — return 403 agar handleChat retry akun berikutnya
+		// WAF block murni yang datang dengan status 200 — jangan tulis ke
+		// klien; balikkan 403 agar handler mencoba akun berikutnya.
 		if cleaned != nil {
 			log.Printf("[autoclawpi] WAF hard block: %s", truncateResp(cleaned, 80))
 		}
 		return http.StatusForbidden, ct, rawBody, nil
 	}
-	w.WriteHeader(statusCode)
-	w.Write(cleaned)
+	if cleaned != nil {
+		w.WriteHeader(resp.StatusCode)
+		w.Write(cleaned)
+	} else {
+		w.WriteHeader(resp.StatusCode)
+		w.Write(rawBody)
+	}
 
 	// Log token usage
 	go logUsage(acct.ID, route, rawBody)
 
-	return statusCode, ct, nil, nil
+	return resp.StatusCode, ct, nil, nil
 }
 
 // stripNonStandard removes non-OpenAI fields from chat completion response.
@@ -326,7 +337,6 @@ func stripNonStandard(body []byte) []byte {
 
 // logUsage parse response body dan catat ke database.
 func logUsage(acctID int64, model string, body []byte) {
-	// Strip ALL WAF prefixes
 	for bytes.Contains(body, []byte(`"message":"forbidden"`)) {
 		idx := bytes.Index(body, []byte(`"message":"forbidden"`))
 		next := bytes.Index(body[idx+1:], []byte(`{`))
