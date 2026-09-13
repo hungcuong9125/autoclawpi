@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hirotomasato/autoclawpi/internal/client"
 	"github.com/hirotomasato/autoclawpi/internal/db"
 	"github.com/hirotomasato/autoclawpi/internal/sign"
 )
@@ -30,6 +31,7 @@ func cmdCheckin(args []string) error {
 	accountID := fs.Int64("account", 0, "ID akun (0 = semua akun)")
 	dryRun := fs.Bool("dry-run", false, "cek tanpa klaim")
 	fs.Parse(args)
+	_, cl := loadAll()
 
 	accounts, err := db.ListAccounts()
 	if err != nil {
@@ -57,7 +59,7 @@ func cmdCheckin(args []string) error {
 		}
 
 		// fetch saldo sebelum check-in
-		balance, _ := fetchBalance(a.AccessToken)
+		balance, _ := fetchBalance(cl, a.AccessToken)
 		fmt.Printf("  Saldo: %d pts\n", balance)
 
 		for _, task := range checkinTasks {
@@ -74,7 +76,7 @@ func cmdCheckin(args []string) error {
 			}
 
 			// klaim
-			points, err := claimTask(a, task.ID)
+			points, err := claimTask(cl, a, task.ID)
 			if err != nil {
 				fmt.Printf("  %s: GAGAL — %v\n", task.ID, err)
 				db.AddCheckinLog(a.ID, today, task.ID, 0, "failed:"+err.Error(), a.DeviceID)
@@ -88,7 +90,7 @@ func cmdCheckin(args []string) error {
 
 		// fetch saldo setelah check-in (update)
 		if !*dryRun {
-			newBalance, _ := fetchBalance(a.AccessToken)
+			newBalance, _ := fetchBalance(cl, a.AccessToken)
 			if newBalance > balance {
 				db.UpdatePoints(a.ID, newBalance)
 			}
@@ -103,7 +105,7 @@ func cmdCheckin(args []string) error {
 }
 
 // fetchBalance mengambil saldo dari server.
-func fetchBalance(token string) (int, error) {
+func fetchBalance(cl *client.Client, token string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	hdrs := commonHeaders(token)
@@ -112,7 +114,7 @@ func fetchBalance(token string) (int, error) {
 	for k, v := range hdrs {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cl.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -131,7 +133,7 @@ func fetchBalance(token string) (int, error) {
 }
 
 // claimTask mengirim POST task-complete dan mengembalikan points.
-func claimTask(a db.Account, taskID string) (int, error) {
+func claimTask(cl *client.Client, a db.Account, taskID string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -149,7 +151,7 @@ func claimTask(a db.Account, taskID string) (int, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cl.Do(req)
 	if err != nil {
 		return 0, err
 	}

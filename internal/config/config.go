@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 )
 
+const HTTPProxyKey = "http_proxy"
+
 // Config adalah konfigurasi autoclawpi.
 type Config struct {
 	// Host untuk listen (default 127.0.0.1, jangan 0.0.0.0).

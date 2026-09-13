@@ -22,6 +22,7 @@
 - WAF prefix stripping — handles multiple `{"message":"forbidden"}` prefixes
 - WAF auto-retry — switch to next account on hard block + 500ms delay
 - Token bucket rate limiter — prevents WAF rate-limit (configurable)
+- HTTP proxy — route all outbound AutoClaw API requests through a configurable proxy
 
 ### 🌐 Web Management Panel
 - **Dashboard** — account overview, points balance, API usage stats, cost tracking
@@ -29,7 +30,7 @@
 - **Claim 100M** — claim newbie token reward for fresh accounts
 - **Check-In** — daily reward claiming for all accounts
 - **Logs** — real-time API request log with terminal-style view
-- **Settings** — password, multiple API keys, round-robin strategy
+- **Settings** — password, HTTP proxy, multiple API keys, round-robin strategy
 - **Health** — test & refresh all account tokens
 - **API Docs** — endpoint reference with curl examples
 - **Responsive** — collapsible sidebar, adaptive layout
@@ -67,6 +68,19 @@ autoclawpi serve --port 8787 --web-password yourpassword --api-key sk-your-key
 ```
 
 Open **http://localhost:8787** in your browser.
+
+### HTTP Proxy
+
+Configure the proxy from **Settings → HTTP Proxy**. Accepted formats:
+
+```text
+host:port:user:pass
+http://user:pass@host:port
+```
+
+The setting is applied immediately and persisted in the SQLite `config` table. It
+covers inference, OAuth, refresh, check-in, reward, and balance requests. Local
+requests to autoclawpi's own `/v1/models` endpoint remain local.
 
 ---
 

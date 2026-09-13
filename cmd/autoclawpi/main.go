@@ -90,7 +90,13 @@ func loadAll() (*config.Config, *client.Client) {
 	if err != nil {
 		fatal(err)
 	}
-	return cfg, client.New(cfg.InferenceBase, cfg.UserAPIBase)
+	cl := client.New(cfg.InferenceBase, cfg.UserAPIBase)
+	if proxy, _ := db.GetConfig(config.HTTPProxyKey); proxy != "" {
+		if err := cl.SetProxy(proxy); err != nil {
+			fatal(fmt.Errorf("proxy config không hợp lệ: %w", err))
+		}
+	}
+	return cfg, cl
 }
 
 func cmdServe(args []string) error {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/hirotomasato/autoclawpi/internal/client"
+	"github.com/hirotomasato/autoclawpi/internal/config"
 	"github.com/hirotomasato/autoclawpi/internal/db"
 	"github.com/hirotomasato/autoclawpi/internal/sign"
 )
@@ -76,6 +77,7 @@ func New(cl *client.Client, opts ...Option) *Server {
 	s.mux.HandleFunc("/settings", s.authMiddleware(s.handleSettings))
 	s.mux.HandleFunc("/settings/password", s.authMiddleware(s.handleSettingsPassword))
 	s.mux.HandleFunc("/settings/strategy", s.authMiddleware(s.handleSettingsStrategy))
+	s.mux.HandleFunc("/settings/proxy", s.authMiddleware(s.handleSettingsProxy))
 	s.mux.HandleFunc("/settings/apikey", s.authMiddleware(s.handleSettingsAPIKey))
 	s.mux.HandleFunc("/settings/apikey/delete", s.authMiddleware(s.handleSettingsAPIKeyDelete))
 	s.mux.HandleFunc("/docs", s.authMiddleware(s.handleDocs))
@@ -222,7 +224,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			activeCount++
 		}
 		// Auto-fetch balance from server for each account
-		balance := fetchBalanceDashboard(a.AccessToken)
+		balance := fetchBalanceDashboard(a.AccessToken, s.cl)
 		if balance > 0 && balance != a.Points {
 			_ = db.UpdatePoints(a.ID, balance)
 			a.Points = balance
@@ -251,7 +253,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 // fetchBalanceDashboard ambil balance dari server. Mirip fetchBalance di checkin.go
-func fetchBalanceDashboard(token string) int {
+func fetchBalanceDashboard(token string, cl *client.Client) int {
 	ts := time.Now().Unix()
 	req, err := http.NewRequest("GET", "https://autoglm-api.autoglm.ai/agent-assetmgr/api/v1/wallet-instances?biz_app_id=autoclaw", nil)
 	if err != nil {
@@ -269,7 +271,7 @@ func fetchBalanceDashboard(token string) int {
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("X-Trace-Id", sign.UUID())
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cl.Do(req)
 	if err != nil {
 		return 0
 	}
@@ -323,16 +325,16 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			if err == nil && id > 0 {
 				switch parts[1] {
 				case "delete":
-								db.DeleteAccount(id)
-								http.Redirect(w, r, "/accounts", http.StatusSeeOther)
-								return
-							case "refresh":
-								refreshBalance(id)
-								w.WriteHeader(204)
-								return
-							case "claim":
-								s.handleClaim100MForAccount(w, r, id)
-								return
+					db.DeleteAccount(id)
+					http.Redirect(w, r, "/accounts", http.StatusSeeOther)
+					return
+				case "refresh":
+					refreshBalance(id)
+					w.WriteHeader(204)
+					return
+				case "claim":
+					s.handleClaim100MForAccount(w, r, id)
+					return
 				}
 			}
 		}
@@ -449,9 +451,9 @@ func (s *Server) handleAccountsLoginStart(w http.ResponseWriter, r *http.Request
 		sceneID = capCfg.Data.SceneID
 	}
 	s.renderTemplate(w, "login.html", "login", map[string]any{
-		"Flow":    "captcha",
-		"Prefix":  prefix,
-		"SceneID": sceneID,
+		"Flow":     "captcha",
+		"Prefix":   prefix,
+		"SceneID":  sceneID,
 		"LoginURL": "/accounts/login/captcha-result",
 	})
 }
@@ -773,13 +775,15 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.renderTemplate(w, "settings.html", "settings", map[string]any{
-		"Strategy":      s.strategy,
-		"DBPath":        "~/.autoclawpi/autoclawpi.db",
-		"DBSize":        "OK",
-		"TotalAccounts": len(accounts),
-		"Models":        models,
-		"APIKey":        apikey,
-		"APIKeys":       apiKeys,
+		"Strategy":        s.strategy,
+		"DBPath":          "~/.autoclawpi/autoclawpi.db",
+		"DBSize":          "OK",
+		"TotalAccounts":   len(accounts),
+		"Models":          models,
+		"APIKey":          apikey,
+		"APIKeys":         apiKeys,
+		"ProxyConfigured": s.cl.ProxyConfigured(),
+		"ProxySummary":    s.cl.ProxySummary(),
 	})
 }
 
@@ -822,6 +826,36 @@ func (s *Server) handleSettingsStrategy(w http.ResponseWriter, r *http.Request) 
 	w.Write([]byte(`<span style="color:#34d399">Strategy updated</span>`))
 }
 
+func (s *Server) handleSettingsProxy(w http.ResponseWriter, r *http.Request) {
+	raw := strings.TrimSpace(r.FormValue("proxy"))
+	if raw == "" {
+		if err := s.cl.SetProxy(""); err != nil {
+			w.Write([]byte(`<span style="color:#f87171">Không thể tắt proxy</span>`))
+			return
+		}
+		if err := db.SetConfig(config.HTTPProxyKey, ""); err != nil {
+			w.Write([]byte(`<span style="color:#f87171">Không thể lưu proxy</span>`))
+			return
+		}
+		w.Write([]byte(`<span style="color:#34d399">HTTP proxy đã tắt</span>`))
+		return
+	}
+	normalized, err := client.NormalizeProxy(raw)
+	if err != nil {
+		w.Write([]byte(`<span style="color:#f87171">Proxy không hợp lệ. Dùng host:port:user:pass hoặc URL http(s).</span>`))
+		return
+	}
+	if err := s.cl.SetProxy(normalized); err != nil {
+		w.Write([]byte(`<span style="color:#f87171">Không thể áp dụng proxy</span>`))
+		return
+	}
+	if err := db.SetConfig(config.HTTPProxyKey, normalized); err != nil {
+		w.Write([]byte(`<span style="color:#f87171">Proxy đã áp dụng nhưng không thể lưu</span>`))
+		return
+	}
+	w.Write([]byte(`<span style="color:#34d399">HTTP proxy đã bật</span>`))
+}
+
 func (s *Server) handleSettingsAPIKey(w http.ResponseWriter, r *http.Request) {
 	name := r.FormValue("name")
 	key := r.FormValue("apikey")
@@ -856,10 +890,10 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	logs, _ := db.ListLogs(100)
 	totalReq, totalTokens, totalCost, _ := db.LogStats()
 	s.renderTemplate(w, "logs.html", "logs", map[string]any{
-		"Logs":       logs,
-		"TotalReq":   totalReq,
+		"Logs":        logs,
+		"TotalReq":    totalReq,
 		"TotalTokens": totalTokens,
-		"TotalCost":  totalCost,
+		"TotalCost":   totalCost,
 	})
 }
 

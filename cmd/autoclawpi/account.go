@@ -103,7 +103,8 @@ func showAccount(args []string) error {
 	}
 
 	// fetch saldo real-time dari server
-	balance, _ := fetchBalance(a.AccessToken)
+	_, cl := loadAll()
+	balance, _ := fetchBalance(cl, a.AccessToken)
 	if balance > 0 {
 		db.UpdatePoints(a.ID, balance) // update total
 		a.Points = balance             // refresh local struct

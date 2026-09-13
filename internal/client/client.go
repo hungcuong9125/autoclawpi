@@ -9,9 +9,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hirotomasato/autoclawpi/internal/sign"
@@ -19,7 +22,9 @@ import (
 
 // Client adalah HTTP client ke API AutoClaw.
 type Client struct {
-	HTTP          *http.Client
+	mu            sync.RWMutex
+	httpClient    *http.Client
+	proxy         string
 	InferenceBase string // https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw
 	UserAPIBase   string // https://autoglm-api.autoglm.ai
 	Version       string
@@ -28,7 +33,7 @@ type Client struct {
 // New membuat client dengan default yang masuk akal.
 func New(inferenceBase, userAPIBase string) *Client {
 	return &Client{
-		HTTP:          &http.Client{Timeout: 0},
+		httpClient:    newHTTPClient(nil),
 		InferenceBase: inferenceBase,
 		UserAPIBase:   userAPIBase,
 		Version:       "1.17.9",
@@ -55,7 +60,100 @@ func deviceID() string {
 // Do melakukan request dengan User-Agent aplikasi.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	req.Header.Set("User-Agent", "AutoClaw/"+c.Version)
-	return c.HTTP.Do(req)
+	c.mu.RLock()
+	httpClient := c.httpClient
+	c.mu.RUnlock()
+	return httpClient.Do(req)
+}
+
+// SetProxy configures the shared outbound HTTP client. An empty value disables
+// the application proxy and restores the default transport behavior.
+func (c *Client) SetProxy(raw string) error {
+	normalized, err := NormalizeProxy(raw)
+	if err != nil {
+		return err
+	}
+	var proxyURL *url.URL
+	if normalized != "" {
+		proxyURL, _ = url.Parse(normalized)
+	}
+	c.mu.Lock()
+	c.httpClient = newHTTPClient(proxyURL)
+	c.proxy = normalized
+	c.mu.Unlock()
+	return nil
+}
+
+// ProxyConfigured reports whether an application HTTP proxy is active.
+func (c *Client) ProxyConfigured() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.proxy != ""
+}
+
+// ProxySummary returns a credential-safe proxy description for the web panel.
+func (c *Client) ProxySummary() string {
+	c.mu.RLock()
+	proxy := c.proxy
+	c.mu.RUnlock()
+	if proxy == "" {
+		return ""
+	}
+	u, err := url.Parse(proxy)
+	if err != nil || u.Host == "" {
+		return "configured"
+	}
+	if u.User != nil {
+		u.User = url.UserPassword(u.User.Username(), "****")
+	}
+	return u.String()
+}
+
+// NormalizeProxy accepts an HTTP(S) proxy URL or host:port:user:pass.
+func NormalizeProxy(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+
+	proxyURL := raw
+	if !strings.Contains(raw, "://") {
+		parts := strings.Split(raw, ":")
+		switch len(parts) {
+		case 2:
+			proxyURL = "http://" + raw
+		case 4:
+			if parts[0] == "" || parts[1] == "" || parts[2] == "" || parts[3] == "" {
+				return "", fmt.Errorf("proxy phải có dạng host:port:user:pass")
+			}
+			proxyURL = (&url.URL{
+				Scheme: "http",
+				Host:   net.JoinHostPort(parts[0], parts[1]),
+				User:   url.UserPassword(parts[2], parts[3]),
+			}).String()
+		default:
+			return "", fmt.Errorf("proxy phải là URL http(s) hoặc host:port:user:pass")
+		}
+	}
+
+	u, err := url.Parse(proxyURL)
+	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Hostname() == "" || u.Port() == "" {
+		return "", fmt.Errorf("proxy URL không hợp lệ")
+	}
+	return u.String(), nil
+}
+
+func newHTTPClient(proxyURL *url.URL) *http.Client {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if ok {
+		transport = transport.Clone()
+	} else {
+		transport = &http.Transport{}
+	}
+	if proxyURL != nil {
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
+	return &http.Client{Transport: transport, Timeout: 0}
 }
 
 // LoginResponse adalah payload balikan oauth login.
@@ -123,11 +221,11 @@ type CaptchaConfigResponse struct {
 	Code int    `json:"code"`
 	Msg  string `json:"msg"`
 	Data *struct {
-		Enabled   bool   `json:"enabled"`
-		Region    string `json:"region"`
-		Prefix    string `json:"prefix"`
-		SceneID   string `json:"scene_id"`
-		Supplier  string `json:"captcha_supplier"`
+		Enabled  bool   `json:"enabled"`
+		Region   string `json:"region"`
+		Prefix   string `json:"prefix"`
+		SceneID  string `json:"scene_id"`
+		Supplier string `json:"captcha_supplier"`
 	} `json:"data"`
 }
 
@@ -177,7 +275,7 @@ func (c *Client) ClaimTask(ctx context.Context, token, taskID string) (int, bool
 	// Tambah header yang diperlukan userapi
 	hdrs["X-Lang"] = "en"
 	hdrs["X-Client-Type"] = "pc"
-	hdrs["authorization"] = token // lowercase untuk userapi
+	hdrs["authorization"] = token   // lowercase untuk userapi
 	delete(hdrs, "X-Authorization") // inference header gak dipake
 
 	body := fmt.Sprintf(`{"task_id":"%s"}`, taskID)
@@ -354,15 +452,15 @@ func (c *Client) InferenceHeader(accessToken, routeModelID string) map[string]st
 		tok = "Bearer " + tok
 	}
 	return map[string]string{
-		"X-Authorization":  tok,
-		"X-Request-Id":     sign.UUID(),
-		"X-Request-Model":  routeModelID,
-		"X-Product":        "autoclaw",
-		"X-Harness-Type":   "zcode",
-		"X-Tm":             "win",
-		"X-Version":        c.Version,
-		"X-Lang":           "id",
-		"x_trace_id":       sign.UUID(),
+		"X-Authorization": tok,
+		"X-Request-Id":    sign.UUID(),
+		"X-Request-Model": routeModelID,
+		"X-Product":       "autoclaw",
+		"X-Harness-Type":  "zcode",
+		"X-Tm":            "win",
+		"X-Version":       c.Version,
+		"X-Lang":          "id",
+		"x_trace_id":      sign.UUID(),
 	}
 }
 
