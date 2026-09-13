@@ -109,6 +109,22 @@ func (c *Client) ProxySummary() string {
 	return u.String()
 }
 
+// CheckProxy verifies that the configured outbound transport can reach the
+// AutoClaw upstream. Any HTTP response proves the proxy connection succeeded.
+func (c *Client) CheckProxy(ctx context.Context) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://autoglm-api.autoglm.ai/", nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	_, _ = io.CopyN(io.Discard, resp.Body, 4096)
+	return resp.StatusCode, nil
+}
+
 // NormalizeProxy accepts an HTTP(S) proxy URL or host:port:user:pass.
 func NormalizeProxy(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)

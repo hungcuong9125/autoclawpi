@@ -63,16 +63,20 @@
           <div style="font-size:12px;color:#64748b;margin-top:2px">Route all external AutoClaw requests through a proxy</div>
         </div>
       </div>
-      <form hx-post="/settings/proxy" hx-target="#proxy-msg" style="display:flex;gap:10px;flex-wrap:wrap">
+        <form hx-post="/settings/proxy" hx-target="#proxy-msg" style="display:flex;gap:10px;flex-wrap:wrap">
         <div style="position:relative;flex:1;min-width:280px">
           <i class="fas fa-network-wired" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:#475569;font-size:13px;pointer-events:none"></i>
-          <input type="password" name="proxy" placeholder="host:port:user:pass" autocomplete="new-password" style="padding-left:36px;font-family:mono;font-size:12px">
+          <input type="password" name="proxy" placeholder="New proxy: host:port:user:pass" autocomplete="new-password" style="padding-left:36px;font-family:mono;font-size:12px">
         </div>
         <button type="submit" class="btn btn-primary" style="padding:10px 20px;font-size:13px"><i class="fas fa-check"></i> Save</button>
       </form>
-      <div style="margin-top:10px;font-size:12px;color:#64748b">{{if .ProxyConfigured}}Active: <span style="color:#34d399;font-family:mono">{{.ProxySummary}}</span>{{else}}Direct connection{{end}}</div>
+      <div style="margin-top:10px;font-size:12px;color:#64748b">{{if .ProxyConfigured}}Saved and active: <span style="color:#34d399;font-family:mono">{{.ProxySummary}}</span>{{else}}Direct connection — no proxy saved{{end}}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+        <button type="button" class="btn btn-ghost" hx-post="/settings/proxy/check" hx-target="#proxy-msg" style="padding:8px 14px;font-size:12px"><i class="fas fa-plug"></i> Check Proxy</button>
+        {{if .ProxyConfigured}}<button type="button" class="btn btn-danger" hx-post="/settings/proxy/clear" hx-target="#proxy-msg" style="padding:8px 14px;font-size:12px"><i class="fas fa-trash"></i> Disable &amp; Delete</button>{{end}}
+      </div>
       <div id="proxy-msg" style="margin-top:8px;font-size:13px"></div>
-      <div style="margin-top:8px;font-size:11px;color:#475569">Leave the field empty and save to disable the proxy.</div>
+      <div style="margin-top:8px;font-size:11px;color:#475569">To change it, enter a new proxy and save. The saved credential is never shown in the input field.</div>
     </div>
 
     {{/* API Keys */}}

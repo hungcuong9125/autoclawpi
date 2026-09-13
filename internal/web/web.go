@@ -78,6 +78,8 @@ func New(cl *client.Client, opts ...Option) *Server {
 	s.mux.HandleFunc("/settings/password", s.authMiddleware(s.handleSettingsPassword))
 	s.mux.HandleFunc("/settings/strategy", s.authMiddleware(s.handleSettingsStrategy))
 	s.mux.HandleFunc("/settings/proxy", s.authMiddleware(s.handleSettingsProxy))
+	s.mux.HandleFunc("/settings/proxy/check", s.authMiddleware(s.handleSettingsProxyCheck))
+	s.mux.HandleFunc("/settings/proxy/clear", s.authMiddleware(s.handleSettingsProxyClear))
 	s.mux.HandleFunc("/settings/apikey", s.authMiddleware(s.handleSettingsAPIKey))
 	s.mux.HandleFunc("/settings/apikey/delete", s.authMiddleware(s.handleSettingsAPIKeyDelete))
 	s.mux.HandleFunc("/docs", s.authMiddleware(s.handleDocs))
@@ -854,6 +856,33 @@ func (s *Server) handleSettingsProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Write([]byte(`<span style="color:#34d399">HTTP proxy đã bật</span>`))
+}
+
+func (s *Server) handleSettingsProxyCheck(w http.ResponseWriter, r *http.Request) {
+	if !s.cl.ProxyConfigured() {
+		w.Write([]byte(`<span style="color:#f59e0b">Chưa cấu hình proxy</span>`))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	status, err := s.cl.CheckProxy(ctx)
+	if err != nil {
+		w.Write([]byte(`<span style="color:#f87171">Proxy không kết nối được</span>`))
+		return
+	}
+	fmt.Fprintf(w, `<span style="color:#34d399">Proxy hoạt động — upstream HTTP %d</span>`, status)
+}
+
+func (s *Server) handleSettingsProxyClear(w http.ResponseWriter, r *http.Request) {
+	if err := s.cl.SetProxy(""); err != nil {
+		w.Write([]byte(`<span style="color:#f87171">Không thể tắt proxy</span>`))
+		return
+	}
+	if err := db.SetConfig(config.HTTPProxyKey, ""); err != nil {
+		w.Write([]byte(`<span style="color:#f87171">Không thể xóa proxy đã lưu</span>`))
+		return
+	}
+	w.Write([]byte(`<span style="color:#34d399">Đã tắt và xóa proxy</span>`))
 }
 
 func (s *Server) handleSettingsAPIKey(w http.ResponseWriter, r *http.Request) {
