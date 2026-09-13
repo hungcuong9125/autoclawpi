@@ -139,6 +139,7 @@ print(r.choices[0].message.content)
 | `/accounts` | Account management |
 | `/accounts/{id}` | Account detail + claim 100M |
 | `/accounts/login` | OAuth login |
+| `/accounts/login/manual` | Complete OAuth login by pasting callback URL/code manually |
 | `/accounts/import` | Import token manually |
 | `/checkin` | Daily check-in |
 | `/logs` | API request logs |

@@ -11,7 +11,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hirotomasato/autoclawpi/internal/client"
@@ -31,6 +33,16 @@ type Server struct {
 	apiKey   string
 	strategy string
 	cl       *client.Client
+
+	// lastOAuthAttempt menyimpan info OAuth URL terakhir, untuk melengkapi
+	// login manual saat callback lokal gagal terpasang.
+	lastOAuthAttempt struct {
+		sync.Mutex
+		Vendor      string
+		NavigateURI string
+		State       string
+		At          time.Time
+	}
 }
 
 // Option untuk konfigurasi web panel.
@@ -70,6 +82,7 @@ func New(cl *client.Client, opts ...Option) *Server {
 	s.mux.HandleFunc("/accounts/login", s.authMiddleware(s.handleAccountsLogin))
 	s.mux.HandleFunc("/accounts/login/start", s.authMiddleware(s.handleAccountsLoginStart))
 	s.mux.HandleFunc("/accounts/login/captcha-result", s.authMiddleware(s.handleAccountsLoginCaptcha))
+	s.mux.HandleFunc("/accounts/login/manual", s.authMiddleware(s.handleAccountsLoginManual))
 	s.mux.HandleFunc("/accounts/import", s.authMiddleware(s.handleAccountsImport))
 	s.mux.HandleFunc("/accounts/claim", s.authMiddleware(s.handleClaim100M))
 	s.mux.HandleFunc("/checkin", s.authMiddleware(s.handleCheckin))
@@ -519,7 +532,7 @@ func (s *Server) handleAccountsLoginCaptcha(w http.ResponseWriter, r *http.Reque
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	oauthURL, _, err := s.cl.OAuthURL(ctx, "zai", navigateURI, "autoclaw", map[string]any{
+	oauthURL, oauthState, err := s.cl.OAuthURL(ctx, "zai", navigateURI, "autoclaw", map[string]any{
 		"ali_captcha_verify_param": req.VerifyParam,
 	})
 	if err != nil {
@@ -527,7 +540,156 @@ func (s *Server) handleAccountsLoginCaptcha(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	s.rememberOAuthAttempt("zai", navigateURI, oauthState)
+
 	json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": oauthURL})
+}
+
+// rememberOAuthAttempt menyimpan info OAuth URL terakhir untuk login manual.
+func (s *Server) rememberOAuthAttempt(vendor, navigateURI, state string) {
+	s.lastOAuthAttempt.Lock()
+	defer s.lastOAuthAttempt.Unlock()
+	s.lastOAuthAttempt.Vendor = vendor
+	s.lastOAuthAttempt.NavigateURI = navigateURI
+	s.lastOAuthAttempt.State = state
+	s.lastOAuthAttempt.At = time.Now()
+}
+
+func (s *Server) getOAuthAttempt() (vendor, navigateURI, state string, at time.Time) {
+	s.lastOAuthAttempt.Lock()
+	defer s.lastOAuthAttempt.Unlock()
+	return s.lastOAuthAttempt.Vendor, s.lastOAuthAttempt.NavigateURI, s.lastOAuthAttempt.State, s.lastOAuthAttempt.At
+}
+
+// saveOAuthAccount menyimpan token hasil login OAuth dan mengambil saldo awal.
+func saveOAuthAccount(cl *client.Client, out *client.LoginResponse, vendor string) (int64, error) {
+	deviceID := "web-oauth-" + fmt.Sprintf("%x", time.Now().UnixNano())
+	userID := ""
+	if out.Data.UserID != nil {
+		userID = fmt.Sprint(out.Data.UserID)
+	}
+	acctID, err := db.AddAccount(out.Data.UserName, out.Data.AccessToken, out.Data.RefreshToken, vendor, userID, out.Data.UserName, deviceID)
+	if err != nil {
+		return 0, err
+	}
+
+	// Auto-fetch balance (synchronous)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel2()
+	if points := fetchBalance(ctx2, out.Data.AccessToken, cl); points > 0 {
+		_ = db.UpdatePoints(acctID, points)
+	}
+	return acctID, nil
+}
+
+// handleAccountsLoginManual melengkapi login OAuth secara manual: user menempel
+// URL callback (atau code saja) dari address bar browser ketika halaman callback
+// lokal gagal termuat (server callback mati, port terpakai, dsb.).
+func (s *Server) handleAccountsLoginManual(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		s.handleAccountsLoginManualPost(w, r)
+		return
+	}
+
+	_, navigateURI, _, at := s.getOAuthAttempt()
+	lastAttempt := ""
+	if navigateURI != "" && time.Since(at) < 30*time.Minute {
+		mins := int(time.Since(at).Minutes())
+		ago := "just now"
+		if mins >= 1 {
+			ago = fmt.Sprintf("%d min ago", mins)
+		}
+		lastAttempt = navigateURI + " (" + ago + ")"
+	}
+	s.renderTemplate(w, "login.html", "login", map[string]any{
+		"Flow":        "manual",
+		"LastAttempt": lastAttempt,
+	})
+}
+
+func (s *Server) handleAccountsLoginManualPost(w http.ResponseWriter, r *http.Request) {
+	fail := func(msg, input string) {
+		s.renderTemplate(w, "login.html", "login", map[string]any{
+			"Flow":      "manual",
+			"Error":     msg,
+			"CodeInput": input,
+		})
+	}
+
+	input := strings.TrimSpace(r.FormValue("code"))
+	if input == "" {
+		fail("Paste the callback URL or the code value", "")
+		return
+	}
+
+	code, state, navigateURI, vendor := input, "", "", "zai"
+
+	// Terima URL callback penuh dari address bar browser.
+	if strings.Contains(input, "/auth/callback") {
+		raw := input
+		if !strings.Contains(raw, "://") {
+			raw = "http://" + raw
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" || u.Path == "" {
+			fail("Could not parse the URL. Paste it exactly as shown in the address bar.", input)
+			return
+		}
+		q := u.Query()
+		if q.Get("code") == "" {
+			fail("URL does not contain a ?code= parameter", input)
+			return
+		}
+		code = q.Get("code")
+		state = q.Get("state")
+		scheme := "http"
+		if u.Scheme != "" {
+			scheme = u.Scheme
+		}
+		navigateURI = scheme + "://" + u.Host + u.Path
+		if strings.Contains(u.Path, "callback-google") {
+			vendor = "google"
+		}
+	}
+
+	// Lengkapi state/navigate_uri dari percobaan OAuth terakhir bila kosong.
+	if state == "" || navigateURI == "" {
+		aVendor, aNav, aState, aAt := s.getOAuthAttempt()
+		if aNav == "" || time.Since(aAt) > 30*time.Minute {
+			fail("No recent OAuth attempt on this server. Paste the full callback URL (including ?code= and &state=) from the browser address bar.", input)
+			return
+		}
+		if state == "" {
+			state = aState
+		}
+		if navigateURI == "" {
+			navigateURI = aNav
+			vendor = aVendor
+		}
+	}
+	if state == "" {
+		fail("Missing state. Paste the full callback URL including &state=...", input)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := s.cl.Login(ctx, vendor, code, state, navigateURI)
+	if err != nil {
+		fail("Login failed: "+err.Error(), input)
+		return
+	}
+	if out.Code != 0 || out.Data == nil || out.Data.AccessToken == "" {
+		fail(fmt.Sprintf("Login failed: code=%d msg=%s", out.Code, out.Msg), input)
+		return
+	}
+
+	if _, err := saveOAuthAccount(s.cl, out, vendor); err != nil {
+		fail("Save failed: "+err.Error(), input)
+		return
+	}
+
+	http.Redirect(w, r, "/accounts", http.StatusSeeOther)
 }
 
 func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
@@ -562,23 +724,9 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	deviceID := "web-oauth-" + fmt.Sprintf("%x", time.Now().UnixNano())
-	userID := ""
-	if out.Data.UserID != nil {
-		userID = fmt.Sprint(out.Data.UserID)
-	}
-	acctID, err := db.AddAccount(out.Data.UserName, out.Data.AccessToken, out.Data.RefreshToken, vendor, userID, out.Data.UserName, deviceID)
-	if err != nil {
+	if _, err := saveOAuthAccount(s.cl, out, vendor); err != nil {
 		http.Error(w, "Save failed: "+err.Error(), 500)
 		return
-	}
-
-	// Auto-fetch balance (synchronous)
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
-	points := fetchBalance(ctx2, out.Data.AccessToken, s.cl)
-	cancel2()
-	if points > 0 {
-		_ = db.UpdatePoints(acctID, points)
 	}
 
 	// Redirect back to web panel
@@ -1024,23 +1172,9 @@ func handleOAuthCallbackRedirect(w http.ResponseWriter, r *http.Request, cl *cli
 		return
 	}
 
-	deviceID := "web-oauth-" + fmt.Sprintf("%x", time.Now().UnixNano())
-	userID := ""
-	if out.Data.UserID != nil {
-		userID = fmt.Sprint(out.Data.UserID)
-	}
-	acctID, err := db.AddAccount(out.Data.UserName, out.Data.AccessToken, out.Data.RefreshToken, vendor, userID, out.Data.UserName, deviceID)
-	if err != nil {
+	if _, err := saveOAuthAccount(cl, out, vendor); err != nil {
 		http.Error(w, "Save failed: "+err.Error(), 500)
 		return
-	}
-
-	// Auto-fetch balance (synchronous)
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
-	points := fetchBalance(ctx2, out.Data.AccessToken, cl)
-	cancel2()
-	if points > 0 {
-		_ = db.UpdatePoints(acctID, points)
 	}
 
 	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
