@@ -80,12 +80,12 @@ func cmdLogin(args []string) error {
 	_ = ln.Close() // nanti start ulang
 
 	h := &loginHandler{
-		cl:         cl,
-		cfg:        cfg,
-		vendor:     *vendor,
-		codeCh:     make(chan string, 1),
-		verifyCh:   make(chan string, 1),
-		serverPort: actualPort,
+		cl:          cl,
+		cfg:         cfg,
+		vendor:      *vendor,
+		codeCh:      make(chan string, 1),
+		verifyCh:    make(chan string, 1),
+		serverPort:  actualPort,
 		navigateURI: fmt.Sprintf("http://localhost:%d/auth/callback-%s", actualPort, *vendor),
 	}
 

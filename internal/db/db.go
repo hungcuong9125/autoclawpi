@@ -32,14 +32,14 @@ type Account struct {
 
 // CheckinLog mencatat history check-in.
 type CheckinLog struct {
-	ID         int64  `json:"id"`
-	AccountID  int64  `json:"account_id"`
-	Date       string `json:"date"`       // YYYY-MM-DD
-	TaskID     string `json:"task_id"`    // daily_signin, dll
-	Points     int    `json:"points"`
-	Status     string `json:"status"`     // success | already_done | failed
-	DeviceID   string `json:"device_id"`
-	CreatedAt  string `json:"created_at"`
+	ID        int64  `json:"id"`
+	AccountID int64  `json:"account_id"`
+	Date      string `json:"date"`    // YYYY-MM-DD
+	TaskID    string `json:"task_id"` // daily_signin, dll
+	Points    int    `json:"points"`
+	Status    string `json:"status"` // success | already_done | failed
+	DeviceID  string `json:"device_id"`
+	CreatedAt string `json:"created_at"`
 }
 
 // Init membuka/membuat database dan menjalankan migrasi.
