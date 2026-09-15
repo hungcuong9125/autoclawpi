@@ -23,8 +23,14 @@ func cmdAccount(args []string) error {
 		return removeAccount(args[1:])
 	case "show":
 		return showAccount(args[1:])
+	case "disable":
+		return setAccountsActive(args[1:], false)
+	case "enable":
+		return setAccountsActive(args[1:], true)
+	case "disable-agent-access":
+		return disableAgentAccessAccounts(args[1:])
 	default:
-		return fmt.Errorf("subcommand: list | add | remove | show")
+		return fmt.Errorf("subcommand: list | add | remove | show | disable <id>... | enable <id>... | disable-agent-access")
 	}
 }
 
@@ -83,6 +89,87 @@ func tokenSourceLabel(token string) string {
 		return src
 	}
 	return "tidak terbaca"
+}
+
+// setAccountsActive mengaktifkan/menonaktifkan akun berdasarkan ID.
+// Menonaktifkan bersifat reversibel (pakai `enable`), bukan menghapus.
+func setAccountsActive(ids []string, active bool) error {
+	if len(ids) == 0 {
+		verb := "disable"
+		if active {
+			verb = "enable"
+		}
+		return fmt.Errorf("usage: autoclawpi account %s <id> [id...]", verb)
+	}
+	action := "dinonaktifkan"
+	if active {
+		action = "diaktifkan"
+	}
+	for _, raw := range ids {
+		var id int64
+		if _, err := fmt.Sscanf(raw, "%d", &id); err != nil || id <= 0 {
+			return fmt.Errorf("id %q tidak valid", raw)
+		}
+		a, err := db.GetAccount(id)
+		if err != nil {
+			return err
+		}
+		if a == nil {
+			return fmt.Errorf("akun #%d tidak ditemukan", id)
+		}
+		if err := db.SetAccountActive(id, active); err != nil {
+			return err
+		}
+		fmt.Printf("akun #%d (%s) %s\n", id, a.Name, action)
+	}
+	return nil
+}
+
+// disableAgentAccessAccounts menonaktifkan semua akun yang tokennya bersumber
+// agent-access. Token jenis itu selalu ditolak upstream dengan 410004, jadi
+// akun seperti itu tidak akan pernah bisa melayani inference.
+//
+// Nonaktif (bukan hapus) supaya token aslinya tetap tersimpan dan bisa
+// diaktifkan lagi lewat `account enable <id>`.
+func disableAgentAccessAccounts(args []string) error {
+	fs := flag.NewFlagSet("disable-agent-access", flag.ExitOnError)
+	dryRun := fs.Bool("dry-run", false, "hanya tampilkan, tidak mengubah apa pun")
+	fs.Parse(args)
+
+	accounts, err := db.ListAccounts()
+	if err != nil {
+		return err
+	}
+
+	var targets []db.Account
+	for _, a := range accounts {
+		if a.Active && client.IsAgentAccessToken(a.AccessToken) {
+			targets = append(targets, a)
+		}
+	}
+	if len(targets) == 0 {
+		fmt.Println("tidak ada akun aktif bersumber agent-access")
+		return nil
+	}
+
+	for _, a := range targets {
+		if *dryRun {
+			fmt.Printf("akan dinonaktifkan: #%d (%s)\n", a.ID, a.Name)
+			continue
+		}
+		if err := db.SetAccountActive(a.ID, false); err != nil {
+			return err
+		}
+		fmt.Printf("akun #%d (%s) dinonaktifkan\n", a.ID, a.Name)
+	}
+
+	if *dryRun {
+		fmt.Printf("\n%d akun akan dinonaktifkan (dry-run, belum ada perubahan)\n", len(targets))
+		return nil
+	}
+	fmt.Printf("\n%d akun dinonaktifkan. Token tetap tersimpan; dùng `account enable <id>` để hoàn tác.\n", len(targets))
+	fmt.Println("Thêm account OAuth thật qua web panel để bắt đầu dùng được inference.")
+	return nil
 }
 
 func removeAccount(args []string) error {

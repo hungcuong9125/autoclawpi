@@ -35,6 +35,12 @@ Pemakaian:
   autoclawpi status                tampilkan status login (token disensor)
   autoclawpi logout                hapus kredensial tersimpan
   autoclawpi version               tampilkan versi
+
+Kelola akun:
+  autoclawpi account list                    daftar akun + sumber token
+  autoclawpi account add --access <token>    tambah akun manual
+  autoclawpi account disable-agent-access    nonaktifkan akun bersumber agent-access
+  autoclawpi account disable|enable <id>...  bật/tắt akun theo ID
 `
 
 func main() {
