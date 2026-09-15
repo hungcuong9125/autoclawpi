@@ -119,7 +119,8 @@ func cmdServe(args []string) error {
 	}
 
 	// Main handler: OpenAI API
-	apiSrv := server.New(cl).WithAPIKey(cfg.APIKey)
+	apiSrv := server.New(cl).WithAPIKey(cfg.APIKey).
+		WithAllowAgentAccess(cfg.AllowAgentAccessTokens)
 	if cfg.RateLimitPerSec > 0 || cfg.RateLimitBurst > 0 {
 		apiSrv.WithRateLimit(cfg.RateLimitPerSec, cfg.RateLimitBurst)
 	}
@@ -132,6 +133,9 @@ func cmdServe(args []string) error {
 	}
 	if cfg.APIKey != "" {
 		webOpts = append(webOpts, web.WithAPIKey(cfg.APIKey))
+	}
+	if cfg.AllowAgentAccessTokens {
+		webOpts = append(webOpts, web.WithAllowAgentAccess(true))
 	}
 	webHandler := web.New(cl, webOpts...)
 

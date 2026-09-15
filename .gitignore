@@ -6,3 +6,10 @@
 *.db-shm
 .env
 credentials.json
+
+# Kredensial akun — JANGAN pernah commit (berisi access/refresh token).
+autoclaw-*.json
+*.token.json
+
+# Data lokal agen
+.workbuddy-ai/

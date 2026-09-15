@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/hirotomasato/autoclawpi/internal/client"
 	"github.com/hirotomasato/autoclawpi/internal/db"
 )
 
@@ -36,13 +37,13 @@ func listAccounts() error {
 		fmt.Println("tidak ada akun. jalankan 'autoclawpi login' atau 'autoclawpi import'")
 		return nil
 	}
-	fmt.Printf("%-4s %-20s %-8s %-12s %-8s %s\n", "ID", "Name", "Provider", "User", "Points", "Last Used")
+	fmt.Printf("%-4s %-20s %-8s %-12s %-8s %-4s %-24s %s\n", "ID", "Name", "Provider", "User", "Points", "On", "Token Source", "Last Used")
 	for _, a := range accounts {
 		active := "✓"
 		if !a.Active {
 			active = "✗"
 		}
-		fmt.Printf("%-4d %-20s %-8s %-12s %-8d %s %s\n", a.ID, truncate(a.Name, 18), a.Provider, truncate(a.UserName, 10), a.Points, active, truncate(a.LastUsedAt, 16))
+		fmt.Printf("%-4d %-20s %-8s %-12s %-8d %-4s %-24s %s\n", a.ID, truncate(a.Name, 18), a.Provider, truncate(a.UserName, 10), a.Points, active, tokenSourceLabel(a.AccessToken), truncate(a.LastUsedAt, 16))
 	}
 	return nil
 }
@@ -53,19 +54,35 @@ func addAccount(args []string) error {
 	access := fs.String("access", "", "access token")
 	refresh := fs.String("refresh", "", "refresh token (opsional)")
 	provider := fs.String("provider", "zai", "zai | google")
+	allowAgent := fs.Bool("allow-agent-access", false, "izinkan token bersumber agent-access (selalu ditolak upstream)")
 	fs.Parse(args)
 
 	if *access == "" {
 		fmt.Fprintf(os.Stderr, "usage: autoclawpi account add --access <token> [--refresh <token>] [--name <name>] [--provider zai|google]\n")
 		os.Exit(2)
 	}
+	// Token bersumber agent-access selalu ditolak upstream dengan 410004,
+	// jadi menambahkannya hanya menghasilkan akun mati. Arahkan ke OAuth.
+	if !*allowAgent && client.IsAgentAccessToken(*access) {
+		return fmt.Errorf("token bersumber agent-access (source_id=%s) selalu ditolak upstream dengan 410004; "+
+			"login lewat OAuth di web panel dengan akun Google asli, atau pakai --allow-agent-access untuk memaksa",
+			client.SourceAgentAccess)
+	}
 	deviceID := fmt.Sprintf("autoclawpi-%d", time.Now().UnixNano())
 	id, err := db.AddAccount(*name, *access, *refresh, *provider, "", "", deviceID)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("akun #%d ditambahkan\n", id)
+	fmt.Printf("akun #%d ditambahkan (source_id=%s)\n", id, tokenSourceLabel(*access))
 	return nil
+}
+
+// tokenSourceLabel mengembalikan source_id token untuk ditampilkan ke user.
+func tokenSourceLabel(token string) string {
+	if src := client.TokenSource(token); src != "" {
+		return src
+	}
+	return "tidak terbaca"
 }
 
 func removeAccount(args []string) error {

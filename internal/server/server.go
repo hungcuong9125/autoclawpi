@@ -20,11 +20,12 @@ import (
 
 // Server adalah proxy server OpenAI-compatible.
 type Server struct {
-	cl      *client.Client
-	rrIndex int
-	mu      sync.Mutex
-	apiKey  string
-	limiter *RateLimiter
+	cl               *client.Client
+	rrIndex          int
+	mu               sync.Mutex
+	apiKey           string
+	limiter          *RateLimiter
+	allowAgentAccess bool
 }
 
 // New membuat server baru.
@@ -49,6 +50,14 @@ func (s *Server) WithAPIKey(key string) *Server {
 	if key != "" {
 		s.apiKey = key
 	}
+	return s
+}
+
+// WithAllowAgentAccess melonggarkan penyaringan token agent-access.
+// Default false: akun dengan source_id=agentaccess_token dilewati karena
+// upstream selalu menolaknya dengan 410004.
+func (s *Server) WithAllowAgentAccess(allow bool) *Server {
+	s.allowAgentAccess = allow
 	return s
 }
 
@@ -97,6 +106,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Model di luar katalog: gagal cepat, jangan buang request ke semua akun.
+	if !client.KnownModel(req.Model) {
+		writeOpenAIError(w, 400, "invalid_model",
+			fmt.Sprintf("model %q tidak dikenal; pilihan: %s", req.Model, strings.Join(client.SupportedModels(), ", ")))
+		return
+	}
+
 	route := client.RouteID(req.Model)
 	upstreamBody, err := replaceModel(raw, client.BodyModel(route))
 	if err != nil {
@@ -104,9 +120,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Round-robin: coba setiap akun hingga salah satu berhasil
 	accounts, _ := db.ListAccounts()
-	if len(accounts) == 0 {
+	usable, skippedAgent := s.filterUsableAccounts(accounts)
+	if len(usable) == 0 {
+		if skippedAgent > 0 {
+			writeOpenAIError(w, 503, "no_usable_accounts", fmt.Sprintf(
+				"%d akun aktif memakai token agent-access (source_id=%s) yang selalu ditolak upstream dengan 410004. "+
+					"Login ulang lewat OAuth di web panel dengan akun Google asli.",
+				skippedAgent, client.SourceAgentAccess))
+			return
+		}
 		writeOpenAIError(w, 503, "no_accounts", "tidak ada akun tersedia")
 		return
 	}
@@ -120,58 +143,157 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	startIdx := s.rrIndex % len(accounts)
-	s.rrIndex = (s.rrIndex + 1) % len(accounts)
+	startIdx := s.rrIndex % len(usable)
+	s.rrIndex = (s.rrIndex + 1) % len(usable)
 	s.mu.Unlock()
 
-	var lastStatus int
-	for i := range len(accounts) {
-		idx := (startIdx + i) % len(accounts)
-		acct := accounts[idx]
-		if !acct.Active || acct.AccessToken == "" {
-			continue
-		}
+	var lastErr *client.UpstreamError
+	for i := range len(usable) {
+		idx := (startIdx + i) % len(usable)
+		acct := usable[idx]
 
-		var ferr error
-		lastStatus, _, _, ferr = s.forward(r.Context(), acct, route, upstreamBody, req.Stream, w)
-		if ferr != nil {
-			log.Printf("[autoclawpi] akun #%d error: %v", acct.ID, ferr)
+		ue := s.tryAccount(r.Context(), &acct, route, upstreamBody, req.Stream, w)
+		if ue.Kind == client.KindOK {
+			return
+		}
+		lastErr = ue
+
+		// 410004 — akun ditolak permanen: karantina, jangan pernah dicoba lagi.
+		if ue.ShouldDisableAccount() {
+			s.quarantineAccount(acct, ue)
 			continue
 		}
-		// 401 — token expired, coba refresh
-		if lastStatus == 401 {
-			refreshed, rerr := s.refreshToken(&acct)
-			if rerr != nil {
-				log.Printf("[autoclawpi] akun #%d refresh gagal: %v", acct.ID, rerr)
-				continue
-			}
-			// Retry dengan token baru
-			var ferr2 error
-			lastStatus, _, _, ferr2 = s.forward(r.Context(), acct, route, upstreamBody, req.Stream, w)
-			if ferr2 != nil {
-				log.Printf("[autoclawpi] akun #%d retry error: %v", acct.ID, ferr2)
-				continue
-			}
-			_ = refreshed
-			if lastStatus == 200 {
-				return
-			}
-			continue
+		// Kesalahan request (model/body): akun lain tidak akan menolong.
+		if ue.IsFatalForAllAccounts() {
+			break
 		}
-		// 403 — WAF block, coba akun berikutnya
-		if lastStatus == 403 {
+		// WAF polos: beri jeda sebelum pindah akun.
+		if ue.Kind == client.KindWAFBlocked {
 			log.Printf("[autoclawpi] akun #%d WAF block, coba akun berikutnya", acct.ID)
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
-		if lastStatus == 200 {
-			return
+		// Kuota model habis di akun ini — akun lain mungkin masih punya.
+		if ue.Kind == client.KindQuotaExhausted {
+			log.Printf("[autoclawpi] akun #%d kuota model habis (code=%d), coba akun berikutnya", acct.ID, ue.Code)
 		}
-		// Status lain (4xx, 5xx) — coba akun berikutnya
 	}
 
-	// Semua akun gagal — sertakan status upstream terakhir untuk diagnosis
-	writeOpenAIError(w, 503, "all_accounts_failed", fmt.Sprintf("semua akun gagal memproses request (last_status=%d)", lastStatus))
+	s.writeUpstreamFailure(w, lastErr)
+}
+
+// filterUsableAccounts menyaring akun yang layak dipakai untuk inference.
+//
+// Akun dengan token bersumber agent-access (source_id=agentaccess_token)
+// dilewati: token jenis itu terbukti selalu ditolak upstream dengan 410004,
+// jadi mencobanya hanya membuang waktu dan memicu failover palsu.
+func (s *Server) filterUsableAccounts(accounts []db.Account) (usable []db.Account, skippedAgent int) {
+	for _, a := range accounts {
+		if !a.Active || a.AccessToken == "" {
+			continue
+		}
+		if !s.allowAgentAccess && client.IsAgentAccessToken(a.AccessToken) {
+			skippedAgent++
+			continue
+		}
+		usable = append(usable, a)
+	}
+	return usable, skippedAgent
+}
+
+// tryAccount mengirim request ke satu akun, menangani refresh token (401) dan
+// throttle (810002) dengan backoff. Mengembalikan klasifikasi hasil terakhir.
+func (s *Server) tryAccount(ctx context.Context, acct *db.Account, route string, body []byte, stream bool, w http.ResponseWriter) *client.UpstreamError {
+	const (
+		maxThrottleRetries  = 3
+		throttleBaseBackoff = 700 * time.Millisecond
+	)
+	refreshed := false
+	throttles := 0
+
+	for {
+		status, _, raw, err := s.forward(ctx, *acct, route, body, stream, w)
+		if err != nil {
+			log.Printf("[autoclawpi] akun #%d error jaringan: %v", acct.ID, err)
+			return &client.UpstreamError{Kind: client.KindUpstreamError, Message: err.Error()}
+		}
+
+		ue := client.Classify(status, raw)
+		if ue.Kind == client.KindOK {
+			return ue
+		}
+
+		switch ue.Kind {
+		case client.KindTokenExpired:
+			if refreshed {
+				return ue
+			}
+			if _, rerr := s.refreshToken(acct); rerr != nil {
+				log.Printf("[autoclawpi] akun #%d refresh gagal: %v", acct.ID, rerr)
+				return ue
+			}
+			refreshed = true
+			// Peringatkan kalau token hasil refresh justru dari sumber yang diblokir.
+			if client.IsAgentAccessToken(acct.AccessToken) {
+				log.Printf("[autoclawpi] akun #%d PERINGATAN: token hasil refresh bersumber %s — upstream akan menolaknya dengan 410004. Login ulang via OAuth.",
+					acct.ID, client.SourceAgentAccess)
+			}
+			continue
+
+		case client.KindThrottled:
+			if throttles >= maxThrottleRetries {
+				return ue
+			}
+			throttles++
+			backoff := throttleBaseBackoff * time.Duration(1<<(throttles-1))
+			log.Printf("[autoclawpi] akun #%d throttle (code=%d), retry %d/%d setelah %s",
+				acct.ID, ue.Code, throttles, maxThrottleRetries, backoff)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return ue
+			}
+			continue
+		}
+
+		return ue
+	}
+}
+
+// quarantineAccount menonaktifkan akun yang ditolak permanen oleh upstream.
+func (s *Server) quarantineAccount(acct db.Account, ue *client.UpstreamError) {
+	log.Printf("[autoclawpi] akun #%d DIBLOKIR upstream (code=%d %s) — dinonaktifkan, tidak dicoba lagi",
+		acct.ID, ue.Code, ue.Message)
+	if err := db.SetAccountActive(acct.ID, false); err != nil {
+		log.Printf("[autoclawpi] gagal menonaktifkan akun #%d: %v", acct.ID, err)
+	}
+}
+
+// writeUpstreamFailure menerjemahkan kegagalan terakhir menjadi response OpenAI.
+func (s *Server) writeUpstreamFailure(w http.ResponseWriter, lastErr *client.UpstreamError) {
+	if lastErr == nil {
+		writeOpenAIError(w, 503, "all_accounts_failed", "semua akun gagal memproses request")
+		return
+	}
+
+	detail := fmt.Sprintf("upstream %d kind=%s code=%d: %s",
+		lastErr.HTTPStatus, lastErr.Kind, lastErr.Code, lastErr.Message)
+
+	switch {
+	case lastErr.IsFatalForAllAccounts():
+		writeOpenAIError(w, 400, "invalid_request_error", detail)
+	case lastErr.Kind == client.KindAccountBanned:
+		writeOpenAIError(w, 503, "all_accounts_banned",
+			"semua akun tersedia diblokir upstream (410004 账号已被封禁); login ulang via OAuth dengan akun Google asli")
+	case lastErr.Kind == client.KindQuotaExhausted:
+		writeOpenAIError(w, 429, "model_quota_exhausted",
+			"kuota gratis model ini sudah habis di semua akun (810000); pakai model lain atau akun dengan langganan — "+detail)
+	case lastErr.Kind == client.KindThrottled:
+		writeOpenAIError(w, 429, "upstream_throttled",
+			"upstream sedang membatasi permintaan (810002 pay-view), coba lagi nanti — "+detail)
+	default:
+		writeOpenAIError(w, 503, "all_accounts_failed", "semua akun gagal memproses request — "+detail)
+	}
 }
 
 // forward mengirim request ke upstream dan menulis response ke klien.
@@ -396,16 +518,19 @@ func logUsage(acctID int64, model string, httpStatus int, body []byte) {
 }
 
 // handleModels menangani /v1/models.
+// Daftar diambil dari katalog tunggal di package client supaya tidak ada
+// dua sumber kebenaran yang bisa saling menyimpang.
 func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
-	// Model yang sudah diverifikasi bisa inference (2026-09-05).
-	models := []map[string]any{
-		{"id": "auto", "object": "model", "created": 1, "owned_by": "autoclaw"},
-		{"id": "auto-fast", "object": "model", "created": 1, "owned_by": "autoclaw"},
-		{"id": "glm-5-turbo", "object": "model", "created": 1, "owned_by": "autoclaw"},
-		{"id": "glm-5.3", "object": "model", "created": 1, "owned_by": "autoclaw"},
-		{"id": "glm-5.3-flash", "object": "model", "created": 1, "owned_by": "autoclaw"},
-		{"id": "deepseek-v4-pro", "object": "model", "created": 1, "owned_by": "autoclaw"},
-		{"id": "deepseek-v4-flash", "object": "model", "created": 1, "owned_by": "autoclaw"},
+	models := make([]map[string]any, 0, len(client.Catalog()))
+	for _, m := range client.Catalog() {
+		models = append(models, map[string]any{
+			"id":       m.ID,
+			"object":   "model",
+			"created":  1,
+			"owned_by": "autoclaw",
+			"name":     m.Name,
+			"route_id": m.RouteID,
+		})
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": models})
 }
@@ -452,9 +577,19 @@ func (s *Server) refreshToken(acct *db.Account) (bool, error) {
 	}
 	acct.AccessToken = out.Data.AccessToken
 	acct.RefreshToken = newRefresh
-	_ = db.UpdateAccount(acct)
-	log.Printf("[autoclawpi] akun #%d token diperbarui", acct.ID)
+	if err := db.UpdateAccountTokens(acct.ID, acct.AccessToken, acct.RefreshToken); err != nil {
+		return false, fmt.Errorf("simpan token: %w", err)
+	}
+	log.Printf("[autoclawpi] akun #%d token diperbarui (source_id=%s)", acct.ID, tokenSourceOrUnknown(acct.AccessToken))
 	return true, nil
+}
+
+// tokenSourceOrUnknown mengembalikan source_id token, atau "?" bila tak terbaca.
+func tokenSourceOrUnknown(token string) string {
+	if src := client.TokenSource(token); src != "" {
+		return src
+	}
+	return "?"
 }
 
 // ── helpers ─────────────────────────────────────────────────────────

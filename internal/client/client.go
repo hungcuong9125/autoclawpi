@@ -480,22 +480,79 @@ func (c *Client) InferenceHeader(accessToken, routeModelID string) map[string]st
 	}
 }
 
+// ModelInfo mendeskripsikan satu model yang dipublikasikan proxy.
+type ModelInfo struct {
+	ID            string // nama OpenAI-style yang dipakai klien
+	RouteID       string // X-Request-Model yang dikirim ke upstream
+	Name          string // label manusia
+	ContextWindow int
+	MaxTokens     int
+}
+
+// modelCatalog adalah satu-satunya sumber kebenaran untuk daftar model.
+//
+// Diverifikasi langsung ke upstream (2026-09-15): setiap RouteID di bawah
+// mengembalikan HTTP 200, sedangkan "zai_glm-5-turbo" mengembalikan
+// 400 {"message":"非法模型"}. RouteID juga harus cocok dengan
+// ~/.openclaw-autoclaw/openclaw.runtime.json → models.providers.zai.models[].id
+// pada app yang terpasang; kalau app di-update, sinkronkan ulang dari sana.
+var modelCatalog = []ModelInfo{
+	{ID: "auto", RouteID: "zai_auto", Name: "Auto", ContextWindow: 1048576, MaxTokens: 131072},
+	{ID: "auto-fast", RouteID: "zai_auto-fast", Name: "Auto-Fast", ContextWindow: 1048576, MaxTokens: 393216},
+	{ID: "glm-5.3", RouteID: "zaicoding_glm-5.3", Name: "GLM-5.3", ContextWindow: 1048576, MaxTokens: 307200},
+	{ID: "glm-5.3-flash", RouteID: "zai_glm-5.3-flash", Name: "GLM-5.3-Flash", ContextWindow: 1048576, MaxTokens: 131072},
+	{ID: "deepseek-v4-pro", RouteID: "tdpsk_deepseek-v4-pro-202606", Name: "DeepSeek-V4-Pro", ContextWindow: 1048576, MaxTokens: 393216},
+	{ID: "deepseek-v4-flash", RouteID: "tdpsk_deepseek-v4-flash-202605", Name: "DeepSeek-V4.1-Flash", ContextWindow: 1048576, MaxTokens: 393216},
+}
+
+// Catalog mengembalikan salinan katalog model yang didukung.
+func Catalog() []ModelInfo {
+	out := make([]ModelInfo, len(modelCatalog))
+	copy(out, modelCatalog)
+	return out
+}
+
+// SupportedModels adalah catalog OpenAI-style yang dipublikasikan oleh proxy.
+func SupportedModels() []string {
+	out := make([]string, 0, len(modelCatalog))
+	for _, m := range modelCatalog {
+		out = append(out, m.ID)
+	}
+	return out
+}
+
 // RouteID memetakan nama model OpenAI-style ke route id AutoClaw.
+// Nama yang sudah berupa route id (mengandung "_") dikembalikan apa adanya.
 func RouteID(model string) string {
 	if containsUnderscore(model) {
 		return model // sudah route id
 	}
-	// DeepSeek model pakai prefix tdpsk_ + versi date.
-	switch model {
-	case "deepseek-v4-pro":
-		return "tdpsk_deepseek-v4-pro-202606"
-	case "deepseek-v4-flash":
-		return "tdpsk_deepseek-v4-flash-202605"
+	for _, m := range modelCatalog {
+		if m.ID == model {
+			return m.RouteID
+		}
 	}
-	if isVersioned(model) {
-		return "zaicoding_" + model
+	// Di luar katalog: teruskan apa adanya, biar upstream yang memutuskan.
+	// Hasilnya akan terklasifikasi sebagai invalid_model.
+	return model
+}
+
+// KnownModel melaporkan apakah nama model (atau route id) ada di katalog.
+func KnownModel(model string) bool {
+	if containsUnderscore(model) {
+		for _, m := range modelCatalog {
+			if m.RouteID == model {
+				return true
+			}
+		}
+		return false
 	}
-	return "zai_" + model
+	for _, m := range modelCatalog {
+		if m.ID == model {
+			return true
+		}
+	}
+	return false
 }
 
 // BodyModel membalik RouteID: "zaicoding_glm-5.3" -> "glm-5.3".
@@ -515,9 +572,4 @@ func containsUnderscore(s string) bool {
 		}
 	}
 	return false
-}
-
-// isVersioned true untuk glm-5.3 / glm-5.2 (versi coding plan).
-func isVersioned(model string) bool {
-	return model == "glm-5.3" || model == "glm-5.2"
 }

@@ -198,6 +198,21 @@ func DeleteAccount(id int64) error {
 	return err
 }
 
+// SetAccountActive mengaktifkan/menonaktifkan akun.
+// Dipakai untuk mengarantina akun yang ditolak permanen oleh upstream
+// (mis. kode 410004 账号已被封禁) supaya tidak dicoba berulang kali.
+func SetAccountActive(id int64, active bool) error {
+	_, err := DB.Exec(`UPDATE accounts SET active = ? WHERE id = ?`, active, id)
+	return err
+}
+
+// UpdateAccountTokens menyimpan token hasil refresh tanpa menyentuh field lain.
+func UpdateAccountTokens(id int64, accessToken, refreshToken string) error {
+	_, err := DB.Exec(`UPDATE accounts SET access_token = ?, refresh_token = ? WHERE id = ?`,
+		accessToken, refreshToken, id)
+	return err
+}
+
 // UpdatePoints menambah poin akun.
 func UpdatePoints(id int64, points int) error {
 	_, err := DB.Exec(`UPDATE accounts SET points = ? WHERE id = ?`, points, id)
