@@ -89,23 +89,23 @@ func checkAccounts(args []string) error {
 		st, err := cl.UserProfile(ctx, a.AccessToken)
 		switch {
 		case err != nil:
-			fmt.Printf("  #%-3d %-18s LỖI     %v\n", a.ID, truncate(a.Name, 16), err)
+			fmt.Printf("  #%-3d %-18s ERROR   %v\n", a.ID, truncate(a.Name, 16), err)
 		case st.Banned():
 			banned++
-			fmt.Printf("  #%-3d %-18s BỊ BAN  (code=%d %s)\n", a.ID, truncate(a.Name, 16), st.Code, st.Msg)
+			fmt.Printf("  #%-3d %-18s BANNED  (code=%d %s)\n", a.ID, truncate(a.Name, 16), st.Code, st.Msg)
 		case st.Code == 0:
 			fmt.Printf("  #%-3d %-18s OK\n", a.ID, truncate(a.Name, 16))
 		default:
-			fmt.Printf("  #%-3d %-18s LỖI     code=%d %s\n", a.ID, truncate(a.Name, 16), st.Code, st.Msg)
+			fmt.Printf("  #%-3d %-18s ERROR   code=%d %s\n", a.ID, truncate(a.Name, 16), st.Code, st.Msg)
 		}
 	}
 
 	fmt.Println()
 	if banned > 0 {
-		fmt.Printf("%d/%d akun bị AutoClaw cấm (410004). Đây là trạng thái phía server — "+
-			"token mới, refresh, hay login lại đều không cứu được. Dùng akun khác.\n", banned, len(targets))
+		fmt.Printf("%d/%d akun banned by AutoClaw (410004). This is server-side account status — "+
+			"a new token, refresh, or re-login cannot recover it. Use a different account.\n", banned, len(targets))
 	} else {
-		fmt.Printf("%d akun đã kiểm tra, không có akun nào bị cấm.\n", len(targets))
+		fmt.Printf("%d akun checked, none banned.\n", len(targets))
 	}
 	return nil
 }
@@ -239,7 +239,7 @@ func disableAgentAccessAccounts(args []string) error {
 		fmt.Printf("\n%d akun akan dinonaktifkan (dry-run, belum ada perubahan)\n", len(targets))
 		return nil
 	}
-	fmt.Printf("\n%d akun dinonaktifkan. Token tetap tersimpan; dùng `account enable <id>` để hoàn tác.\n", len(targets))
+	fmt.Printf("\n%d akun dinonaktifkan. Token tetap tersimpan; use `account enable <id>` to undo.\n", len(targets))
 	return nil
 }
 

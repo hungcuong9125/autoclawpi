@@ -140,7 +140,7 @@ func NormalizeProxy(raw string) (string, error) {
 			proxyURL = "http://" + raw
 		case 4:
 			if parts[0] == "" || parts[1] == "" || parts[2] == "" || parts[3] == "" {
-				return "", fmt.Errorf("proxy phải có dạng host:port:user:pass")
+				return "", fmt.Errorf("proxy must be in the form host:port:user:pass")
 			}
 			proxyURL = (&url.URL{
 				Scheme: "http",
@@ -148,13 +148,13 @@ func NormalizeProxy(raw string) (string, error) {
 				User:   url.UserPassword(parts[2], parts[3]),
 			}).String()
 		default:
-			return "", fmt.Errorf("proxy phải là URL http(s) hoặc host:port:user:pass")
+			return "", fmt.Errorf("proxy must be an http(s) URL or host:port:user:pass")
 		}
 	}
 
 	u, err := url.Parse(proxyURL)
 	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Hostname() == "" || u.Port() == "" {
-		return "", fmt.Errorf("proxy URL không hợp lệ")
+		return "", fmt.Errorf("invalid proxy URL")
 	}
 	return u.String(), nil
 }

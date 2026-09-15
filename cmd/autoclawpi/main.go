@@ -40,7 +40,7 @@ Kelola akun:
   autoclawpi account list                    daftar akun + sumber token
   autoclawpi account add --access <token>    tambah akun manual
   autoclawpi account disable-agent-access    nonaktifkan akun bersumber agent-access
-  autoclawpi account disable|enable <id>...  bật/tắt akun theo ID
+  autoclawpi account disable|enable <id>...  enable/disable akun by ID
 `
 
 func main() {
@@ -99,7 +99,7 @@ func loadAll() (*config.Config, *client.Client) {
 	cl := client.New(cfg.InferenceBase, cfg.UserAPIBase)
 	if proxy, _ := db.GetConfig(config.HTTPProxyKey); proxy != "" {
 		if err := cl.SetProxy(proxy); err != nil {
-			fatal(fmt.Errorf("proxy config không hợp lệ: %w", err))
+			fatal(fmt.Errorf("invalid proxy config: %w", err))
 		}
 	}
 	return cfg, cl

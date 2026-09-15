@@ -986,57 +986,57 @@ func (s *Server) handleSettingsProxy(w http.ResponseWriter, r *http.Request) {
 	raw := strings.TrimSpace(r.FormValue("proxy"))
 	if raw == "" {
 		if err := s.cl.SetProxy(""); err != nil {
-			w.Write([]byte(`<span style="color:#f87171">Không thể tắt proxy</span>`))
+			w.Write([]byte(`<span style="color:#f87171">Cannot disable proxy</span>`))
 			return
 		}
 		if err := db.SetConfig(config.HTTPProxyKey, ""); err != nil {
-			w.Write([]byte(`<span style="color:#f87171">Không thể lưu proxy</span>`))
+			w.Write([]byte(`<span style="color:#f87171">Cannot save proxy</span>`))
 			return
 		}
-		w.Write([]byte(`<span style="color:#34d399">HTTP proxy đã tắt</span>`))
+		w.Write([]byte(`<span style="color:#34d399">HTTP proxy disabled</span>`))
 		return
 	}
 	normalized, err := client.NormalizeProxy(raw)
 	if err != nil {
-		w.Write([]byte(`<span style="color:#f87171">Proxy không hợp lệ. Dùng host:port:user:pass hoặc URL http(s).</span>`))
+		w.Write([]byte(`<span style="color:#f87171">Invalid proxy. Use host:port:user:pass or an http(s) URL.</span>`))
 		return
 	}
 	if err := s.cl.SetProxy(normalized); err != nil {
-		w.Write([]byte(`<span style="color:#f87171">Không thể áp dụng proxy</span>`))
+		w.Write([]byte(`<span style="color:#f87171">Cannot apply proxy</span>`))
 		return
 	}
 	if err := db.SetConfig(config.HTTPProxyKey, normalized); err != nil {
-		w.Write([]byte(`<span style="color:#f87171">Proxy đã áp dụng nhưng không thể lưu</span>`))
+		w.Write([]byte(`<span style="color:#f87171">Proxy applied but could not be saved</span>`))
 		return
 	}
-	w.Write([]byte(`<span style="color:#34d399">HTTP proxy đã bật</span>`))
+	w.Write([]byte(`<span style="color:#34d399">HTTP proxy enabled</span>`))
 }
 
 func (s *Server) handleSettingsProxyCheck(w http.ResponseWriter, r *http.Request) {
 	if !s.cl.ProxyConfigured() {
-		w.Write([]byte(`<span style="color:#f59e0b">Chưa cấu hình proxy</span>`))
+		w.Write([]byte(`<span style="color:#f59e0b">Proxy not configured</span>`))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	status, err := s.cl.CheckProxy(ctx)
 	if err != nil {
-		w.Write([]byte(`<span style="color:#f87171">Proxy không kết nối được</span>`))
+		w.Write([]byte(`<span style="color:#f87171">Proxy unreachable</span>`))
 		return
 	}
-	fmt.Fprintf(w, `<span style="color:#34d399">Proxy hoạt động — upstream HTTP %d</span>`, status)
+	fmt.Fprintf(w, `<span style="color:#34d399">Proxy working — upstream HTTP %d</span>`, status)
 }
 
 func (s *Server) handleSettingsProxyClear(w http.ResponseWriter, r *http.Request) {
 	if err := s.cl.SetProxy(""); err != nil {
-		w.Write([]byte(`<span style="color:#f87171">Không thể tắt proxy</span>`))
+		w.Write([]byte(`<span style="color:#f87171">Cannot disable proxy</span>`))
 		return
 	}
 	if err := db.SetConfig(config.HTTPProxyKey, ""); err != nil {
-		w.Write([]byte(`<span style="color:#f87171">Không thể xóa proxy đã lưu</span>`))
+		w.Write([]byte(`<span style="color:#f87171">Cannot delete saved proxy</span>`))
 		return
 	}
-	w.Write([]byte(`<span style="color:#34d399">Đã tắt và xóa proxy</span>`))
+	w.Write([]byte(`<span style="color:#34d399">Proxy disabled and deleted</span>`))
 }
 
 func (s *Server) handleSettingsAPIKey(w http.ResponseWriter, r *http.Request) {

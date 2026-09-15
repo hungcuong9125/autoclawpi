@@ -267,7 +267,7 @@ func (s *Server) writeUpstreamFailure(w http.ResponseWriter, lastErr *client.Ups
 		writeOpenAIError(w, 503, "all_accounts_banned",
 			"semua akun tersedia diblokir upstream (410004 账号已被封禁). "+
 				"Ini status akun di sisi AutoClaw — token baru/refresh tidak menolong. "+
-				"Akun sudah dinonaktifkan otomatis; kalau upstream memulihkan, bật lại bằng "+
+				"Akun sudah dinonaktifkan otomatis; kalau upstream memulihkan, re-enable with "+
 				"`autoclawpi account enable <id>`.")
 	case lastErr.Kind == client.KindQuotaExhausted:
 		writeOpenAIError(w, 429, "model_quota_exhausted",
