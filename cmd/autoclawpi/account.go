@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -29,9 +30,84 @@ func cmdAccount(args []string) error {
 		return setAccountsActive(args[1:], true)
 	case "disable-agent-access":
 		return disableAgentAccessAccounts(args[1:])
+	case "check":
+		return checkAccounts(args[1:])
 	default:
-		return fmt.Errorf("subcommand: list | add | remove | show | disable <id>... | enable <id>... | disable-agent-access")
+		return fmt.Errorf("subcommand: list | add | remove | show | check | disable <id>... | enable <id>... | disable-agent-access")
 	}
+}
+
+// checkAccounts menanyakan status tiap akun ke /userapi/v1/user-profile.
+//
+// Jauh lebih murah dan lebih pasti daripada menembak endpoint inference lalu
+// menebak dari kode galatnya: endpoint ini menyebut statusnya terus terang
+// ("User banned" untuk 410004).
+func checkAccounts(args []string) error {
+	fs := flag.NewFlagSet("check", flag.ExitOnError)
+	all := fs.Bool("all", false, "periksa semua akun, termasuk yang nonaktif")
+	fs.Parse(args)
+
+	accounts, err := db.ListAccounts()
+	if err != nil {
+		return err
+	}
+	if len(accounts) == 0 {
+		fmt.Println("tidak ada akun")
+		return nil
+	}
+
+	var targets []db.Account
+	if len(fs.Args()) > 0 {
+		for _, raw := range fs.Args() {
+			var id int64
+			if _, err := fmt.Sscanf(raw, "%d", &id); err != nil || id <= 0 {
+				return fmt.Errorf("id %q tidak valid", raw)
+			}
+			a, err := db.GetAccount(id)
+			if err != nil {
+				return err
+			}
+			if a == nil {
+				return fmt.Errorf("akun #%d tidak ditemukan", id)
+			}
+			targets = append(targets, *a)
+		}
+	} else {
+		for _, a := range accounts {
+			if *all || a.Active {
+				targets = append(targets, a)
+			}
+		}
+	}
+
+	_, cl := loadAll()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	banned := 0
+	for _, a := range targets {
+		st, err := cl.UserProfile(ctx, a.AccessToken)
+		switch {
+		case err != nil:
+			fmt.Printf("  #%-3d %-18s LỖI     %v\n", a.ID, truncate(a.Name, 16), err)
+		case st.Banned():
+			banned++
+			fmt.Printf("  #%-3d %-18s BỊ BAN  (code=%d %s)\n", a.ID, truncate(a.Name, 16), st.Code, st.Msg)
+		case st.Code == 0:
+			fmt.Printf("  #%-3d %-18s OK\n", a.ID, truncate(a.Name, 16))
+		default:
+			fmt.Printf("  #%-3d %-18s LỖI     code=%d %s\n", a.ID, truncate(a.Name, 16), st.Code, st.Msg)
+		}
+	}
+
+	fmt.Println()
+	if banned > 0 {
+		fmt.Printf("%d/%d akun bị AutoClaw cấm (410004). Đây là trạng thái phía server — "+
+			"token mới, refresh, hay login lại đều không cứu được. Dùng akun khác.\n", banned, len(targets))
+	} else {
+		fmt.Printf("%d akun đã kiểm tra, không có akun nào bị cấm.\n", len(targets))
+	}
+	return nil
 }
 
 func listAccounts() error {

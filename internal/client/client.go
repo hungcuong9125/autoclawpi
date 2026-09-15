@@ -537,6 +537,63 @@ func SupportedModels() []string {
 	return out
 }
 
+// ProfileStatus adalah hasil pemeriksaan status akun di userapi.
+//
+// Endpoint ini menjawab dengan HTTP 200 walau akun diblokir, jadi kode bisnis
+// di body yang harus dibaca — bukan status HTTP.
+type ProfileStatus struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+}
+
+// Banned melaporkan apakah akun ditolak permanen oleh AutoClaw.
+func (p *ProfileStatus) Banned() bool {
+	return p != nil && p.Code == 410004
+}
+
+// UserProfile memeriksa status akun lewat /userapi/v1/user-profile.
+//
+// Ini cara termurah dan paling pasti untuk tahu apakah sebuah akun masih
+// hidup: jauh lebih baik daripada menembak endpoint inference dan menebak
+// dari kode galatnya. Respons 410004 di sini berarti "User banned" — status
+// akun di sisi AutoClaw yang tidak bisa diperbaiki dari sisi klien.
+func (c *Client) UserProfile(ctx context.Context, accessToken string) (*ProfileStatus, error) {
+	if accessToken == "" {
+		return nil, fmt.Errorf("access token kosong")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(c.UserAPIBase, "/")+"/userapi/v1/user-profile",
+		strings.NewReader("{}"))
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range sign.Headers() {
+		req.Header.Set(k, v)
+	}
+	tok := strings.TrimSpace(accessToken)
+	if !strings.HasPrefix(tok, "Bearer ") {
+		tok = "Bearer " + tok
+	}
+	req.Header.Set("authorization", tok)
+	req.Header.Set("X-Lang", "en")
+	req.Header.Set("X-Client-Type", "pc")
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	var out ProfileStatus
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("HTTP %d: payload bukan JSON: %s", resp.StatusCode, truncate(raw, 200))
+	}
+	return &out, nil
+}
+
 // RouteID memetakan nama model OpenAI-style ke route id AutoClaw.
 // Nama yang sudah berupa route id (mengandung "_") dikembalikan apa adanya.
 func RouteID(model string) string {
