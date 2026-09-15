@@ -8,12 +8,16 @@ import (
 	"time"
 )
 
-// Source ID yang muncul di claim "source_id" của access token AutoClaw.
+// Source ID yang muncul di claim "source_id" dari access token AutoClaw.
+// Nilai ini hanya informatif untuk diagnostik.
 //
-//	autoclawaccess_token — token hasil OAuth flow thật (app/web login).
-//	agentaccess_token    — token hasil /userapi/v1/agent-refresh atau jalur
-//	                       agent API. AutoClaw menandai token jenis ini dan
-//	                       menolaknya di endpoint inference dengan 410004.
+//	autoclawaccess_token — token dari OAuth flow / /userapi/v1/refresh
+//	agentaccess_token    — token dari /userapi/v1/agent-refresh
+//
+// PENTING: source_id TIDAK menentukan apakah token diterima upstream.
+// Diukur langsung (2026-09-15) pada satu akun yang sama: token dengan kedua
+// source_id tersebut sama-sama ditolak 410004. Jangan pakai nilai ini untuk
+// memfilter akun — lihat komentar filterUsableAccounts di package server.
 const (
 	SourceAutoClawAccess = "autoclawaccess_token"
 	SourceAgentAccess    = "agentaccess_token"
@@ -88,7 +92,7 @@ func TokenExpiry(accessToken string) (time.Time, error) {
 }
 
 // IsAgentAccessToken melaporkan apakah token berasal dari jalur agent-access.
-// Token jenis ini sudah terbukti ditolak upstream dengan 410004.
+// Hanya untuk diagnostik — bukan indikator bahwa token akan ditolak.
 func IsAgentAccessToken(accessToken string) bool {
 	return TokenSource(accessToken) == SourceAgentAccess
 }
@@ -97,9 +101,9 @@ func IsAgentAccessToken(accessToken string) bool {
 func TokenSourceHint(accessToken string) string {
 	switch TokenSource(accessToken) {
 	case SourceAutoClawAccess:
-		return "OAuth flow (dapat dipakai inference)"
+		return "OAuth / /userapi/v1/refresh"
 	case SourceAgentAccess:
-		return "agent-access (ditolak upstream dengan 410004 — login ulang via OAuth)"
+		return "agent-access (/userapi/v1/agent-refresh)"
 	case "":
 		return "tidak terbaca"
 	default:

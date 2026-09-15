@@ -271,17 +271,33 @@ func (c *Client) Login(ctx context.Context, vendor, code, state, navigateURI str
 }
 
 // Refresh memperbarui access token pakai refresh token.
+//
+// Memakai /userapi/v1/refresh — endpoint yang dipakai app AutoClaw sendiri.
+// Ada endpoint lain, /userapi/v1/agent-refresh, yang juga mengembalikan
+// code:0 dan token yang sah; keduanya berfungsi, tetapi mencocokkan app resmi
+// lebih kecil risikonya terhadap perubahan upstream. Fallback ke agent-refresh
+// bila endpoint utama tidak tersedia, supaya tidak ada regresi.
 func (c *Client) Refresh(ctx context.Context, refreshToken string) (*LoginResponse, error) {
 	body := map[string]any{
 		"refresh_token": refreshToken,
 		"device_id":     deviceID(),
 		"source_id":     "autoclaw",
 	}
+
 	var out LoginResponse
-	if err := c.userapiPost(ctx, "/userapi/v1/agent-refresh", body, &out); err != nil {
-		return nil, err
+	err := c.userapiPost(ctx, "/userapi/v1/refresh", body, &out)
+	if err == nil && out.Code == 0 && out.Data != nil && out.Data.AccessToken != "" {
+		return &out, nil
 	}
-	return &out, nil
+
+	fallback := LoginResponse{}
+	if ferr := c.userapiPost(ctx, "/userapi/v1/agent-refresh", body, &fallback); ferr != nil {
+		if err != nil {
+			return nil, err
+		}
+		return nil, ferr
+	}
+	return &fallback, nil
 }
 
 // ClaimTask mengklaim task check-in (daily_signin, dll).

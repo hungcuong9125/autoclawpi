@@ -60,20 +60,15 @@ func addAccount(args []string) error {
 	access := fs.String("access", "", "access token")
 	refresh := fs.String("refresh", "", "refresh token (opsional)")
 	provider := fs.String("provider", "zai", "zai | google")
-	allowAgent := fs.Bool("allow-agent-access", false, "izinkan token bersumber agent-access (selalu ditolak upstream)")
 	fs.Parse(args)
 
 	if *access == "" {
 		fmt.Fprintf(os.Stderr, "usage: autoclawpi account add --access <token> [--refresh <token>] [--name <name>] [--provider zai|google]\n")
 		os.Exit(2)
 	}
-	// Token bersumber agent-access selalu ditolak upstream dengan 410004,
-	// jadi menambahkannya hanya menghasilkan akun mati. Arahkan ke OAuth.
-	if !*allowAgent && client.IsAgentAccessToken(*access) {
-		return fmt.Errorf("token bersumber agent-access (source_id=%s) selalu ditolak upstream dengan 410004; "+
-			"login lewat OAuth di web panel dengan akun Google asli, atau pakai --allow-agent-access untuk memaksa",
-			client.SourceAgentAccess)
-	}
+	// source_id hanya dicatat untuk diagnostik. Jangan menolak token
+	// berdasarkan nilainya — pengukuran menunjukkan source_id tidak
+	// menentukan apakah token diterima upstream.
 	deviceID := fmt.Sprintf("autoclawpi-%d", time.Now().UnixNano())
 	id, err := db.AddAccount(*name, *access, *refresh, *provider, "", "", deviceID)
 	if err != nil {
@@ -126,11 +121,12 @@ func setAccountsActive(ids []string, active bool) error {
 }
 
 // disableAgentAccessAccounts menonaktifkan semua akun yang tokennya bersumber
-// agent-access. Token jenis itu selalu ditolak upstream dengan 410004, jadi
-// akun seperti itu tidak akan pernah bisa melayani inference.
+// agent-access (source_id=agentaccess_token).
 //
-// Nonaktif (bukan hapus) supaya token aslinya tetap tersimpan dan bisa
-// diaktifkan lagi lewat `account enable <id>`.
+// Catatan: source_id TIDAK menentukan apakah akun ditolak upstream — perintah
+// ini hanya alat bersih-bersih untuk akun yang sudah diketahui mati, bukan
+// penyaring otomatis. Nonaktif (bukan hapus) supaya token aslinya tetap
+// tersimpan dan bisa diaktifkan lagi lewat `account enable <id>`.
 func disableAgentAccessAccounts(args []string) error {
 	fs := flag.NewFlagSet("disable-agent-access", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "hanya tampilkan, tidak mengubah apa pun")
@@ -168,7 +164,6 @@ func disableAgentAccessAccounts(args []string) error {
 		return nil
 	}
 	fmt.Printf("\n%d akun dinonaktifkan. Token tetap tersimpan; dùng `account enable <id>` để hoàn tác.\n", len(targets))
-	fmt.Println("Thêm account OAuth thật qua web panel để bắt đầu dùng được inference.")
 	return nil
 }
 

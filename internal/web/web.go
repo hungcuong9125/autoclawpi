@@ -27,13 +27,12 @@ var templateFS embed.FS
 
 // Server adalah web panel server.
 type Server struct {
-	mux              *http.ServeMux
-	tmpl             *template.Template
-	password         string
-	apiKey           string
-	strategy         string
-	cl               *client.Client
-	allowAgentAccess bool
+	mux      *http.ServeMux
+	tmpl     *template.Template
+	password string
+	apiKey   string
+	strategy string
+	cl       *client.Client
 
 	// lastOAuthAttempt menyimpan info OAuth URL terakhir, untuk melengkapi
 	// login manual saat callback lokal gagal terpasang.
@@ -57,12 +56,6 @@ func WithPassword(pwd string) Option {
 // WithAPIKey menyimpan API key untuk fetch models internal.
 func WithAPIKey(key string) Option {
 	return func(s *Server) { s.apiKey = key }
-}
-
-// WithAllowAgentAccess melonggarkan penolakan token bersumber agent-access
-// saat impor manual. Default false.
-func WithAllowAgentAccess(allow bool) Option {
-	return func(s *Server) { s.allowAgentAccess = allow }
 }
 
 // New membuat web panel server baru.
@@ -749,15 +742,11 @@ func (s *Server) handleAccountsImport(w http.ResponseWriter, r *http.Request) {
 			s.renderTemplate(w, "import.html", "accounts", map[string]any{"Error": "Access token required", "Name": name})
 			return
 		}
-		// Tolak token bersumber agent-access: upstream selalu menolaknya
-		// dengan 410004, jadi menambahkannya hanya menghasilkan akun mati.
-		if !s.allowAgentAccess && client.IsAgentAccessToken(accessToken) {
-			s.renderTemplate(w, "import.html", "accounts", map[string]any{
-				"Error": "Token ini bersumber agent-access (source_id=" + client.SourceAgentAccess +
-					") dan selalu ditolak upstream dengan 410004. Pakai \"Login OAuth\" di panel dengan akun Google asli, jangan tempel token agent.",
-				"Name": name,
-			})
-			return
+		// Catat sumber token untuk diagnostik, tetapi jangan menolak
+		// berdasarkan source_id: pengukuran menunjukkan source_id tidak
+		// menentukan apakah token diterima upstream.
+		if src := client.TokenSource(accessToken); src != "" {
+			log.Printf("[autoclawpi] impor akun %q dengan token source_id=%s", name, src)
 		}
 		deviceID := "import-" + fmt.Sprintf("%x", time.Now().UnixNano())
 		_, err := db.AddAccount(name, accessToken, refreshToken, "zai", "", "", deviceID)

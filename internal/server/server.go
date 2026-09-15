@@ -20,12 +20,11 @@ import (
 
 // Server adalah proxy server OpenAI-compatible.
 type Server struct {
-	cl               *client.Client
-	rrIndex          int
-	mu               sync.Mutex
-	apiKey           string
-	limiter          *RateLimiter
-	allowAgentAccess bool
+	cl      *client.Client
+	rrIndex int
+	mu      sync.Mutex
+	apiKey  string
+	limiter *RateLimiter
 }
 
 // New membuat server baru.
@@ -50,14 +49,6 @@ func (s *Server) WithAPIKey(key string) *Server {
 	if key != "" {
 		s.apiKey = key
 	}
-	return s
-}
-
-// WithAllowAgentAccess melonggarkan penyaringan token agent-access.
-// Default false: akun dengan source_id=agentaccess_token dilewati karena
-// upstream selalu menolaknya dengan 410004.
-func (s *Server) WithAllowAgentAccess(allow bool) *Server {
-	s.allowAgentAccess = allow
 	return s
 }
 
@@ -121,16 +112,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	accounts, _ := db.ListAccounts()
-	usable, skippedAgent := s.filterUsableAccounts(accounts)
+	usable := filterUsableAccounts(accounts)
 	if len(usable) == 0 {
-		if skippedAgent > 0 {
-			writeOpenAIError(w, 503, "no_usable_accounts", fmt.Sprintf(
-				"%d akun aktif memakai token agent-access (source_id=%s) yang selalu ditolak upstream dengan 410004. "+
-					"Login ulang lewat OAuth di web panel dengan akun Google asli.",
-				skippedAgent, client.SourceAgentAccess))
-			return
-		}
-		writeOpenAIError(w, 503, "no_accounts", "tidak ada akun tersedia")
+		writeOpenAIError(w, 503, "no_accounts", "tidak ada akun aktif tersedia")
 		return
 	}
 
@@ -182,23 +166,25 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	s.writeUpstreamFailure(w, lastErr)
 }
 
-// filterUsableAccounts menyaring akun yang layak dipakai untuk inference.
+// filterUsableAccounts mengembalikan akun yang siap dipakai untuk inference.
 //
-// Akun dengan token bersumber agent-access (source_id=agentaccess_token)
-// dilewati: token jenis itu terbukti selalu ditolak upstream dengan 410004,
-// jadi mencobanya hanya membuang waktu dan memicu failover palsu.
-func (s *Server) filterUsableAccounts(accounts []db.Account) (usable []db.Account, skippedAgent int) {
+// Sengaja TIDAK menyaring berdasarkan claim source_id token. Pengukuran
+// langsung ke upstream (2026-09-15) menunjukkan source_id tidak menentukan
+// apakah akun diterima: untuk satu akun yang sama, token ber-source_id
+// autoclawaccess_token maupun agentaccess_token sama-sama ditolak 410004.
+// Blokir 410004 adalah status akun di sisi server, bukan sifat token — jadi
+// satu-satunya sinyal yang layak dipercaya adalah respons upstream itu sendiri
+// (lihat quarantineAccount). Menyaring di sini hanya akan melewati akun yang
+// sebenarnya sehat.
+func filterUsableAccounts(accounts []db.Account) []db.Account {
+	usable := make([]db.Account, 0, len(accounts))
 	for _, a := range accounts {
 		if !a.Active || a.AccessToken == "" {
 			continue
 		}
-		if !s.allowAgentAccess && client.IsAgentAccessToken(a.AccessToken) {
-			skippedAgent++
-			continue
-		}
 		usable = append(usable, a)
 	}
-	return usable, skippedAgent
+	return usable
 }
 
 // tryAccount mengirim request ke satu akun, menangani refresh token (401) dan
@@ -233,11 +219,6 @@ func (s *Server) tryAccount(ctx context.Context, acct *db.Account, route string,
 				return ue
 			}
 			refreshed = true
-			// Peringatkan kalau token hasil refresh justru dari sumber yang diblokir.
-			if client.IsAgentAccessToken(acct.AccessToken) {
-				log.Printf("[autoclawpi] akun #%d PERINGATAN: token hasil refresh bersumber %s — upstream akan menolaknya dengan 410004. Login ulang via OAuth.",
-					acct.ID, client.SourceAgentAccess)
-			}
 			continue
 
 		case client.KindThrottled:
@@ -284,7 +265,10 @@ func (s *Server) writeUpstreamFailure(w http.ResponseWriter, lastErr *client.Ups
 		writeOpenAIError(w, 400, "invalid_request_error", detail)
 	case lastErr.Kind == client.KindAccountBanned:
 		writeOpenAIError(w, 503, "all_accounts_banned",
-			"semua akun tersedia diblokir upstream (410004 账号已被封禁); login ulang via OAuth dengan akun Google asli")
+			"semua akun tersedia diblokir upstream (410004 账号已被封禁). "+
+				"Ini status akun di sisi AutoClaw — token baru/refresh tidak menolong. "+
+				"Akun sudah dinonaktifkan otomatis; kalau upstream memulihkan, bật lại bằng "+
+				"`autoclawpi account enable <id>`.")
 	case lastErr.Kind == client.KindQuotaExhausted:
 		writeOpenAIError(w, 429, "model_quota_exhausted",
 			"kuota gratis model ini sudah habis di semua akun (810000); pakai model lain atau akun dengan langganan — "+detail)

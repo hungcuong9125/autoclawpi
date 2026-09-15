@@ -17,8 +17,12 @@ func jwtWithSource(t *testing.T, source string) string {
 	return enc([]byte(`{"alg":"HS256"}`)) + "." + enc(payload) + "." + enc([]byte("sig"))
 }
 
-func TestFilterUsableAccountsSkipsAgentAccess(t *testing.T) {
-	s := &Server{}
+// filterUsableAccounts sengaja TIDAK menyaring berdasarkan source_id token.
+//
+// Pengukuran langsung ke upstream menunjukkan satu akun yang sama ditolak
+// 410004 baik dengan token autoclawaccess_token maupun agentaccess_token,
+// jadi source_id bukan sinyal yang layak dipakai untuk membuang akun.
+func TestFilterUsableAccountsKeepsEveryActiveAccount(t *testing.T) {
 	accounts := []db.Account{
 		{ID: 1, Active: true, AccessToken: jwtWithSource(t, client.SourceAgentAccess)},
 		{ID: 2, Active: true, AccessToken: jwtWithSource(t, client.SourceAutoClawAccess)},
@@ -26,23 +30,24 @@ func TestFilterUsableAccountsSkipsAgentAccess(t *testing.T) {
 		{ID: 4, Active: true, AccessToken: ""},
 	}
 
-	usable, skipped := s.filterUsableAccounts(accounts)
-	if skipped != 1 {
-		t.Errorf("skipped = %d, want 1", skipped)
+	usable := filterUsableAccounts(accounts)
+	if len(usable) != 2 {
+		t.Fatalf("usable = %d akun, want 2 (aktif + punya token)", len(usable))
 	}
-	if len(usable) != 1 || usable[0].ID != 2 {
-		t.Fatalf("usable = %+v, want hanya akun #2", usable)
+	for _, a := range usable {
+		if a.ID != 1 && a.ID != 2 {
+			t.Errorf("akun #%d tidak seharusnya lolos", a.ID)
+		}
 	}
 }
 
-func TestFilterUsableAccountsAllowAgentAccessOverride(t *testing.T) {
-	s := &Server{allowAgentAccess: true}
+func TestFilterUsableAccountsSkipsInactiveAndEmptyToken(t *testing.T) {
 	accounts := []db.Account{
-		{ID: 1, Active: true, AccessToken: jwtWithSource(t, client.SourceAgentAccess)},
+		{ID: 1, Active: false, AccessToken: jwtWithSource(t, client.SourceAutoClawAccess)},
+		{ID: 2, Active: true, AccessToken: ""},
 	}
-	usable, skipped := s.filterUsableAccounts(accounts)
-	if skipped != 0 || len(usable) != 1 {
-		t.Fatalf("dengan override, akun agent-access harus ikut dipakai (usable=%d skipped=%d)", len(usable), skipped)
+	if got := filterUsableAccounts(accounts); len(got) != 0 {
+		t.Fatalf("usable = %+v, want kosong", got)
 	}
 }
 

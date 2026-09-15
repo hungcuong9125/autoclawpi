@@ -25,11 +25,6 @@ type Config struct {
 	RateLimitPerSec float64 `json:"rate_limit_per_sec,omitempty"`
 	// RateLimitBurst adalah kapasitas burst token bucket.
 	RateLimitBurst int `json:"rate_limit_burst,omitempty"`
-	// AllowAgentAccessTokens melonggarkan proteksi terhadap token bersumber
-	// agent-access (source_id=agentaccess_token). Token jenis ini selalu
-	// ditolak upstream dengan 410004, jadi default-nya ditolak/dilewati.
-	// Hanya aktifkan untuk debugging.
-	AllowAgentAccessTokens bool `json:"allow_agent_access_tokens,omitempty"`
 }
 
 // Defaults mengisi nilai kosong dengan default yang aman.
@@ -79,9 +74,6 @@ func Load() (*Config, error) {
 	// mengoverride keduanya).
 	if c.APIKey == "" {
 		c.APIKey = os.Getenv("AUTOCLAWPI_API_KEY")
-	}
-	if !c.AllowAgentAccessTokens {
-		c.AllowAgentAccessTokens = os.Getenv("AUTOCLAWPI_ALLOW_AGENT_ACCESS") == "1"
 	}
 	c.Defaults()
 	return c, nil

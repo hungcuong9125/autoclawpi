@@ -13,3 +13,6 @@ autoclaw-*.json
 
 # Data lokal agen
 .workbuddy-ai/
+
+# macOS
+.DS_Store
